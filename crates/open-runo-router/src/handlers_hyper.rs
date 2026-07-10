@@ -5,13 +5,27 @@
 //! matching the JSON shape/status codes of its poem counterpart exactly.
 
 use crate::auth_hyper::check_api_key;
-use crate::hyper_compat::{empty_status, json_response, query_params, Handler};
+use crate::hyper_compat::{empty_status, json_response, query_params, read_json_body, Handler};
 use crate::keyring::KeyGuardian;
 use crate::state::AppState;
+use crate::validation::REGISTER_SCHEMA_REQUEST;
 use hyper::StatusCode;
 use open_runo_schema_registry::{Stage, DEFAULT_NAMESPACE};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// Poem-free equivalent of `audit::actor_from`: identify the caller from
+/// the `X-Api-Key` header alone (JWT/Claims extraction isn't wired at this
+/// layer yet, see auth_hyper.rs doc comment).
+fn actor_from_headers(headers: &hyper::HeaderMap) -> String {
+    match headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        Some(key) if !key.is_empty() => {
+            let prefix: String = key.chars().take(4).collect();
+            format!("api-key:{prefix}***")
+        }
+        _ => "anonymous".to_string(),
+    }
+}
 
 fn parse_stage(s: &str) -> Stage {
     match s.to_lowercase().as_str() {
@@ -235,6 +249,107 @@ pub fn get_schema_history_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
                 .collect();
 
             json_response(StatusCode::OK, &HistoryResponse { versions })
+        })
+    })
+}
+
+fn default_stage() -> String {
+    "local".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct RegisterRequest {
+    service_name: String,
+    sdl: String,
+    #[serde(default = "default_stage")]
+    stage: String,
+    #[serde(default)]
+    namespace: Option<String>,
+}
+
+#[derive(Serialize)]
+struct RegisterResponse {
+    id: String,
+    namespace: String,
+    service_name: String,
+    stage: String,
+    created_at: String,
+}
+
+/// POST /api/schemas — poem-free port of `handlers::schemas::register_schema`.
+pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+
+            let raw: serde_json::Value = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let errors: Vec<String> = REGISTER_SCHEMA_REQUEST
+                .iter_errors(&raw)
+                .map(|e| format!("{} (at {})", e, e.instance_path))
+                .collect();
+            if !errors.is_empty() {
+                return json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({
+                        "error": format!("request body failed validation: {}", errors.join("; "))
+                    }),
+                );
+            }
+
+            let body: RegisterRequest = match serde_json::from_value(raw) {
+                Ok(b) => b,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+
+            let stage = parse_stage(&body.stage);
+            let namespace = body
+                .namespace
+                .clone()
+                .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+            let version = state
+                .schema_registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .register_in(&namespace, &body.service_name, &body.sdl, stage);
+
+            crate::audit::record(
+                &state,
+                &actor,
+                "schema.register",
+                format!("{}@{}", body.service_name, body.stage),
+            )
+            .await;
+
+            let _ = state.events.send(crate::state::SchemaEvent {
+                service_name: body.service_name.clone(),
+                stage: body.stage.clone(),
+                at: chrono::Utc::now().to_rfc3339(),
+            });
+
+            json_response(
+                StatusCode::OK,
+                &RegisterResponse {
+                    id: version.id.to_string(),
+                    namespace: version.namespace.clone(),
+                    service_name: version.service_name.clone(),
+                    stage: stage_name(version.stage).to_string(),
+                    created_at: version.created_at.to_rfc3339(),
+                },
+            )
         })
     })
 }
@@ -486,5 +601,94 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = resp.json().await.expect("valid json body");
         assert_eq!(body["versions"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn register_and_fetch_schema_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/schemas",
+                register_schema_handler(Arc::clone(&state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/schemas/:service",
+                get_schema_handler(Arc::clone(&state), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/schemas"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({
+                "service_name": "users",
+                "sdl": "type User { id: ID! name: String }",
+                "stage": "local"
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["service_name"], "users");
+
+        let resp = client
+            .get(format!("http://{addr}/api/schemas/users"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn register_schema_rejects_invalid_body() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/schemas",
+            register_schema_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/schemas"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "not_a_valid_field": true }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn register_schema_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/schemas",
+            register_schema_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/schemas"))
+            .json(&serde_json::json!({ "service_name": "users", "sdl": "type User { id: ID! }" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
     }
 }
