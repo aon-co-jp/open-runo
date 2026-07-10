@@ -47,6 +47,25 @@ fn set_text(id: &str, text: &str) {
     }
 }
 
+/// Native browser confirm dialog. Used to guard destructive actions
+/// (delete, purge-all) so a stray click can't silently discard data.
+fn confirm(message: &str) -> bool {
+    web_sys::window()
+        .and_then(|w| w.confirm_with_message(message).ok())
+        .unwrap_or(false)
+}
+
+/// Disable/enable a button (or any element) — used to prevent double
+/// submission while an async request is in flight.
+fn set_disabled(id: &str, disabled: bool) {
+    let Some(el) = by_id(id) else { return };
+    if disabled {
+        let _ = el.set_attribute("disabled", "true");
+    } else {
+        let _ = el.remove_attribute("disabled");
+    }
+}
+
 /// Attach `on_click` to element `id`, leaking the closure (fine for a
 /// page's lifetime — the whole page is torn down and its listeners
 /// dropped together whenever `render_*` overwrites `#content`).
@@ -154,15 +173,23 @@ fn render_schemas() {
     );
 
     on_click("register-btn", || {
+        set_disabled("register-btn", true);
         wasm_bindgen_futures::spawn_local(async move {
             let name = input_value("svc-name");
             let sdl = textarea_value("svc-sdl");
             let stage = select_value("svc-stage");
             set_text("register-msg", "registering…");
             match api::register_schema(&name, &sdl, &stage).await {
-                Ok(r) => set_text("register-msg", &format!("registered {} ({})", r.service_name, r.id)),
+                Ok(r) => set_text(
+                    "register-msg",
+                    &format!(
+                        "registered {} @{} in \"{}\" ({}) at {}",
+                        r.service_name, r.stage, r.namespace, r.id, r.created_at
+                    ),
+                ),
                 Err(e) => set_text("register-msg", &format!("failed: {e}")),
             }
+            set_disabled("register-btn", false);
         });
     });
 
@@ -175,7 +202,7 @@ fn render_schemas() {
                     let lines: Vec<String> = h
                         .versions
                         .iter()
-                        .map(|v| format!("{} [{}] {}", v.id, v.stage, v.created_at))
+                        .map(|v| format!("{} {} [{}] {}", v.service_name, v.id, v.stage, v.created_at))
                         .collect();
                     set_text("history-list", &lines.join("\n"));
                 }
@@ -315,6 +342,7 @@ fn render_db() {
     });
 
     on_click("db-put-btn", || {
+        set_disabled("db-put-btn", true);
         wasm_bindgen_futures::spawn_local(async move {
             let table = input_value("db-table");
             let key = input_value("db-key");
@@ -324,18 +352,24 @@ fn render_db() {
                 Ok(r) => set_text("db-record-result", &format!("saved {}: {}", r.key, r.value)),
                 Err(e) => set_text("db-record-result", &format!("failed: {e}")),
             }
+            set_disabled("db-put-btn", false);
         });
     });
 
     on_click("db-delete-btn", || {
+        let table = input_value("db-table");
+        let key = input_value("db-key");
+        if !confirm(&format!("Delete {table}/{key}? This cannot be undone.")) {
+            return;
+        }
+        set_disabled("db-delete-btn", true);
         wasm_bindgen_futures::spawn_local(async move {
-            let table = input_value("db-table");
-            let key = input_value("db-key");
             set_text("db-record-result", "deleting…");
             match api::db_delete(&table, &key).await {
                 Ok(()) => set_text("db-record-result", "deleted"),
                 Err(e) => set_text("db-record-result", &format!("failed: {e}")),
             }
+            set_disabled("db-delete-btn", false);
         });
     });
 }
@@ -398,6 +432,7 @@ fn render_scim() {
     on_click("scim-refresh-btn", refresh_list);
 
     on_click("scim-create-btn", || {
+        set_disabled("scim-create-btn", true);
         wasm_bindgen_futures::spawn_local(async move {
             let user_name = input_value("scim-username");
             let roles_raw = input_value("scim-roles");
@@ -414,12 +449,17 @@ fn render_scim() {
                 }
                 Err(e) => set_text("scim-create-msg", &format!("failed: {e}")),
             }
+            set_disabled("scim-create-btn", false);
         });
     });
 
     on_click("scim-delete-btn", || {
+        let id = input_value("scim-delete-id");
+        if !confirm(&format!("Delete user {id}? This will also revoke their API keys.")) {
+            return;
+        }
+        set_disabled("scim-delete-btn", true);
         wasm_bindgen_futures::spawn_local(async move {
-            let id = input_value("scim-delete-id");
             set_text("scim-delete-msg", "deleting…");
             match api::scim_delete_user(&id).await {
                 Ok(()) => {
@@ -428,6 +468,7 @@ fn render_scim() {
                 }
                 Err(e) => set_text("scim-delete-msg", &format!("failed: {e}")),
             }
+            set_disabled("scim-delete-btn", false);
         });
     });
 }
@@ -471,7 +512,10 @@ fn render_persisted_queries() {
             let hash = input_value("pq-hash");
             set_text("pq-fetch-result", "loading…");
             match api::get_persisted_query(&hash).await {
-                Ok(r) => set_text("pq-fetch-result", &format!("query: {}\nregistered_at: {}", r.query, r.registered_at)),
+                Ok(r) => set_text(
+                    "pq-fetch-result",
+                    &format!("hash: {}\nquery: {}\nregistered_at: {}", r.hash, r.query, r.registered_at),
+                ),
                 Err(e) => set_text("pq-fetch-result", &format!("failed: {e}")),
             }
         });
@@ -512,12 +556,17 @@ fn render_cache_backup() {
     });
 
     on_click("cache-purge-all-btn", || {
+        if !confirm("Purge the entire HTML page cache?") {
+            return;
+        }
+        set_disabled("cache-purge-all-btn", true);
         wasm_bindgen_futures::spawn_local(async move {
             set_text("cache-result", "purging all…");
             match api::cache_purge_all().await {
                 Ok(r) => set_text("cache-result", &format!("purged: {}", r.purged)),
                 Err(e) => set_text("cache-result", &format!("failed: {e}")),
             }
+            set_disabled("cache-purge-all-btn", false);
         });
     });
 
