@@ -1,8 +1,11 @@
 //! open-runo Gateway Router — binary entrypoint.
+//!
+//! Runs on the poem-free `hyper_compat` stack (see CLAUDE.md HANDOFF for
+//! the migration history). REST-only binary. For REST + GraphQL in one
+//! process, run the `open-runo-gateway` binary instead.
 
 use open_runo_core::Config;
-use open_runo_router::{build_app, rate_limit::RateLimit, state::AppState};
-use poem::Route;
+use open_runo_router::{build_hyper_app, hyper_compat, state::AppState};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -18,16 +21,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let state = Arc::new(AppState::new());
-    let rate_limit = RateLimit::new(
+    let app = build_hyper_app(
+        state,
         config.rate_limit_max_requests,
         config.rate_limit_window_secs as i64,
     );
-    // REST-only binary. For REST + GraphQL in one process, run the
-    // `open-runo-gateway` binary instead (it mounts this app plus /graphql).
-    let app = Route::new().nest("/", build_app(Arc::clone(&state), rate_limit));
 
-    let listener = poem::listener::TcpListener::bind(&config.bind_addr);
-    poem::Server::new(listener).run(app).await?;
+    let addr = config
+        .bind_addr
+        .parse()
+        .map_err(|e| format!("invalid bind_addr {:?}: {e}", config.bind_addr))?;
+    let (bound, handle) = hyper_compat::serve(app, addr).await?;
+    tracing::info!(%bound, "open-runo-router listening");
+    handle.await?;
 
     Ok(())
 }
