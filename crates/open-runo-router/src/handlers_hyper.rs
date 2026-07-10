@@ -5,7 +5,7 @@
 //! matching the JSON shape/status codes of its poem counterpart exactly.
 
 use crate::auth_hyper::check_api_key;
-use crate::hyper_compat::{empty_status, json_response, query_params, read_json_body, Handler};
+use crate::hyper_compat::{empty_status, json_response, query_params, read_json_body, sse_response, Handler, SseEvent};
 use crate::keyring::KeyGuardian;
 use crate::state::AppState;
 use crate::validation::{DB_UPSERT_REQUEST, REGISTER_SCHEMA_REQUEST};
@@ -1641,6 +1641,40 @@ pub fn scim_delete_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
     })
 }
 
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// GET /api/events — poem-free port of `handlers::events::stream_events`.
+/// Same heartbeat/history-change SSE semantics as the poem version.
+pub fn stream_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+
+            let initial_len = state.history.lock().map(|h| h.log().len()).unwrap_or(0);
+            let stream = futures::stream::unfold((state, initial_len), |(state, mut last_len)| async move {
+                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+                let current_len = state.history.lock().map(|h| h.log().len()).unwrap_or(last_len);
+                let event = if current_len > last_len {
+                    last_len = current_len;
+                    SseEvent {
+                        event_type: Some("history"),
+                        data: format!("{{\"history_len\":{current_len}}}"),
+                    }
+                } else {
+                    SseEvent { event_type: Some("heartbeat"), data: "ping".to_string() }
+                };
+                Some((event, (state, last_len)))
+            });
+
+            sse_response(stream)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2624,6 +2658,45 @@ mod tests {
         let resp = client
             .get(format!("http://{addr}/api/db/status"))
             .header("x-api-key", &issued)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_returns_event_stream_content_type() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(Method::GET, "/api/events", stream_events_handler(state, guardian));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/events"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap(),
+            "text/event-stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn events_endpoint_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(Method::GET, "/api/events", stream_events_handler(state, guardian));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/events"))
             .send()
             .await
             .expect("request should succeed");

@@ -12,15 +12,20 @@
 //!   (no external router crate needed yet at this scale).
 
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
-use hyper::body::Incoming;
+use futures::Stream;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Frame, Incoming};
 use hyper::{Method, Request as HyperRequest, Response as HyperResponse, StatusCode};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-pub type Body = Full<Bytes>;
+/// Boxed so both fixed bodies (`json_response`) and streamed ones
+/// (`sse_response`) can share a single `Response` type.
+pub type Body = BoxBody<Bytes, Infallible>;
 pub type Request = HyperRequest<Incoming>;
 pub type Response = HyperResponse<Body>;
 pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -36,20 +41,65 @@ impl Params {
     }
 }
 
+fn fixed_body(bytes: Bytes) -> Body {
+    Full::new(bytes).map_err(|never| match never {}).boxed()
+}
+
 /// Build a JSON response with the given status code.
 pub fn json_response(status: StatusCode, value: &impl serde::Serialize) -> Response {
     let body = serde_json::to_vec(value).unwrap_or_else(|_| b"{}".to_vec());
     HyperResponse::builder()
         .status(status)
         .header("content-type", "application/json")
-        .body(Full::new(Bytes::from(body)))
+        .body(fixed_body(Bytes::from(body)))
         .expect("building a response from a fixed set of valid headers cannot fail")
 }
 
 pub fn empty_status(status: StatusCode) -> Response {
     HyperResponse::builder()
         .status(status)
-        .body(Full::new(Bytes::new()))
+        .body(fixed_body(Bytes::new()))
+        .expect("building a response from a fixed set of valid headers cannot fail")
+}
+
+/// One Server-Sent Event: an optional `event:` type and its `data:` payload.
+pub struct SseEvent {
+    pub event_type: Option<&'static str>,
+    pub data: String,
+}
+
+impl SseEvent {
+    fn encode(&self) -> Bytes {
+        let mut out = String::new();
+        if let Some(ty) = self.event_type {
+            out.push_str("event: ");
+            out.push_str(ty);
+            out.push('\n');
+        }
+        for line in self.data.split('\n') {
+            out.push_str("data: ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push('\n');
+        Bytes::from(out)
+    }
+}
+
+/// Build a `text/event-stream` response from a stream of [`SseEvent`]s.
+/// Poem-free equivalent of `poem::web::sse::SSE`.
+pub fn sse_response<S>(stream: S) -> Response
+where
+    S: Stream<Item = SseEvent> + Send + Sync + 'static,
+{
+    use futures::StreamExt;
+    let frame_stream = stream.map(|event| Ok::<_, Infallible>(Frame::data(event.encode())));
+    let body: Body = BodyExt::boxed(StreamBody::new(frame_stream));
+    HyperResponse::builder()
+        .status(StatusCode::OK)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(body)
         .expect("building a response from a fixed set of valid headers cannot fail")
 }
 
