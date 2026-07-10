@@ -71,7 +71,7 @@ pub fn mount() {
     };
     let _ = content;
 
-    for page in ["dashboard", "schemas", "federation", "ai-routing"] {
+    for page in ["dashboard", "schemas", "federation", "ai-routing", "db"] {
         let link_id = format!("nav-{page}");
         on_click(&link_id, move || navigate(page));
     }
@@ -100,6 +100,7 @@ fn navigate(page: &str) {
         "schemas" => render_schemas(),
         "federation" => render_federation(),
         "ai-routing" => render_ai_routing(),
+        "db" => render_db(),
         _ => {}
     }
 }
@@ -251,6 +252,86 @@ fn render_ai_routing() {
                     ),
                 ),
                 Err(e) => set_text("route-result", &format!("failed: {e}")),
+            }
+        });
+    });
+}
+
+fn render_db() {
+    let Some(content) = content_el() else { return };
+    content.set_inner_html(
+        r#"
+        <h2>DUAL DATABASE</h2>
+        <fieldset>
+          <legend>List table</legend>
+          <input id="db-list-table" placeholder="table" />
+          <button id="db-list-btn">List</button>
+          <pre id="db-list-result"></pre>
+        </fieldset>
+        <fieldset>
+          <legend>Get / Put / Delete record</legend>
+          <input id="db-table" placeholder="table" /><br/>
+          <input id="db-key" placeholder="key" /><br/>
+          <textarea id="db-value" rows="3" placeholder='{"hello":"world"}'></textarea><br/>
+          <button id="db-get-btn">Get</button>
+          <button id="db-put-btn">Put</button>
+          <button id="db-delete-btn">Delete</button>
+          <pre id="db-record-result"></pre>
+        </fieldset>
+        "#,
+    );
+
+    on_click("db-list-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let table = input_value("db-list-table");
+            set_text("db-list-result", "loading…");
+            match api::db_list(&table).await {
+                Ok(r) => {
+                    let lines: Vec<String> = r
+                        .records
+                        .iter()
+                        .map(|item| format!("{}: {}", item.key, item.value))
+                        .collect();
+                    set_text("db-list-result", &format!("count: {}\n{}", r.count, lines.join("\n")));
+                }
+                Err(e) => set_text("db-list-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("db-get-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let table = input_value("db-table");
+            let key = input_value("db-key");
+            set_text("db-record-result", "loading…");
+            match api::db_get(&table, &key).await {
+                Ok(r) => set_text("db-record-result", &format!("{}: {}", r.key, r.value)),
+                Err(e) => set_text("db-record-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("db-put-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let table = input_value("db-table");
+            let key = input_value("db-key");
+            let value = textarea_value("db-value");
+            set_text("db-record-result", "saving…");
+            match api::db_put(&table, &key, &value).await {
+                Ok(r) => set_text("db-record-result", &format!("saved {}: {}", r.key, r.value)),
+                Err(e) => set_text("db-record-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("db-delete-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let table = input_value("db-table");
+            let key = input_value("db-key");
+            set_text("db-record-result", "deleting…");
+            match api::db_delete(&table, &key).await {
+                Ok(()) => set_text("db-record-result", "deleted"),
+                Err(e) => set_text("db-record-result", &format!("failed: {e}")),
             }
         });
     });

@@ -168,3 +168,48 @@ pub async fn ai_route(
 ) -> Result<AiRouteResponse, String> {
     post_json("/api/ai/route", &AiRouteRequest { policy, candidates }).await
 }
+
+#[derive(Debug, Deserialize)]
+pub struct DbRecordItem {
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbRecordListResponse {
+    pub count: usize,
+    pub records: Vec<DbRecordItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DbRecordResponse {
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+struct DbUpsertRequest<'a> {
+    value: &'a serde_json::Value,
+}
+
+pub async fn db_list(table: &str) -> Result<DbRecordListResponse, String> {
+    get_json(&format!("/api/db/{table}")).await
+}
+
+pub async fn db_get(table: &str, key: &str) -> Result<DbRecordResponse, String> {
+    get_json(&format!("/api/db/{table}/{key}")).await
+}
+
+pub async fn db_put(table: &str, key: &str, value_json: &str) -> Result<DbRecordResponse, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(value_json).map_err(|e| format!("invalid JSON value: {e}"))?;
+    let body = serde_json::to_string(&DbUpsertRequest { value: &value })
+        .map_err(|e| format!("encode error: {e}"))?;
+    let json = send("PUT", &format!("/api/db/{table}/{key}"), Some(&body)).await?;
+    serde_wasm_bindgen::from_value(json).map_err(|e| format!("decode error: {e}"))
+}
+
+pub async fn db_delete(table: &str, key: &str) -> Result<(), String> {
+    send("DELETE", &format!("/api/db/{table}/{key}"), None).await?;
+    Ok(())
+}
