@@ -1,10 +1,10 @@
-# PORTING.md — open-runo お引越しファイル
+# PORTING.md — poem-cosmo-tauri お引越しファイル
 
-> このファイル 1 枚で、**どのプロジェクトでも open-runo を導入・移設**できます。
+> このファイル 1 枚で、**どのプロジェクトでも poem-cosmo-tauri を導入・移設**できます。
 > open-e-gov / OpenRedmine / OpenWordPress など新プロジェクトのリポジトリに
 > このファイルをコピーして、上から順に進めてください。
 >
-> 対象バージョン: workspace 0.1.0（15 クレート / 176 テスト）
+> 対象バージョン: workspace 0.1.0（15 クレート / 192 テスト）
 > 最終更新: 2026-07-04
 
 ---
@@ -37,7 +37,7 @@ open-runo/
 ```
 
 丸ごと移設する場合はフォルダごとコピーして `cargo test --workspace`
-（176 テストが通れば移設成功）。以下はライブラリとして使う場合です。
+（192 テストが通れば移設成功）。以下はライブラリとして使う場合です。
 
 ## 3. 依存の書き方（新プロジェクトの Cargo.toml）
 
@@ -52,10 +52,13 @@ open-runo-cache    = { path = "../open-runo/crates/open-runo-cache" }
 open-runo-security = { path = "../open-runo/crates/open-runo-security" }
 
 # GitHub 公開後は git 依存でも可
-# open-runo-router = { git = "https://github.com/aon-co-jp/open-runo" }
+# open-runo-router = { git = "https://github.com/aon-co-jp/poem-cosmo-tauri" }
 
-poem  = { version = "3.1", features = ["sse"] }
 tokio = { version = "1.40", features = ["full"] }
+hyper = { version = "1.10", features = ["full"] }
+# poem は不要(open-runo-routerは4.1のようにtokio/hyperで直接動く)。
+# GraphQL Subscriptions(WebSocket)が必要な場合のみ追加:
+# poem = { version = "3.1", features = ["sse"] }
 ```
 
 必要なものだけ選べます（各クレートは独立してテスト可能）。
@@ -68,10 +71,12 @@ DB エンジンは feature で選択: `open-runo-db = { ..., features = ["dual"]
 
 ### 4.1 フルスタック（REST + GraphQL + 自己運用ぜんぶ）
 
+`open-runo-gateway`の`main.rs`をそのまま流用するのが最速です(poem非依存、
+tokio/hyperベース):
+
 ```rust
 use open_runo_core::Config;
-use open_runo_router::{build_app, rate_limit::RateLimit, state::AppState};
-use poem::Route;
+use open_runo_router::{build_hyper_app, hyper_compat, state::AppState};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -80,18 +85,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     open_runo_observability::init_tracing(&config.log_level);
 
     let state = Arc::new(AppState::new()); // 本番: AppState::with_db(...)
-    let rate_limit = RateLimit::new(config.rate_limit_max_requests,
-                                    config.rate_limit_window_secs as i64);
+    let (graphiql, graphql_post) =
+        open_runo_gateway::graphql_hyper::graphql_handlers(Arc::clone(&state));
 
-    let app = Route::new()
-        .nest("/", build_app(Arc::clone(&state), rate_limit))
-        .nest("/graphql", open_runo_gateway::graphql_route(state));
+    let app = build_hyper_app(
+        state,
+        config.rate_limit_max_requests,
+        config.rate_limit_window_secs as i64,
+    )
+    .route(hyper::Method::GET, "/graphql", graphiql)
+    .route(hyper::Method::POST, "/graphql", graphql_post);
 
-    poem::Server::new(poem::listener::TcpListener::bind(&config.bind_addr))
-        .run(app).await?;
+    let addr = config.bind_addr.parse()?;
+    let (_, handle) = hyper_compat::serve(app, addr).await?;
+    handle.await?;
     Ok(())
 }
 ```
+
+GraphQL Subscriptions（WebSocket）が必要な場合のみ、代わりに
+`open_runo_gateway::graphql_route(state)`（poem版、`/graphql/ws`対応）を
+使ってください — その場合`poem`への依存が復活します。
 
 これだけで、認証（KeyGuardian 自動運用）・RBAC・OIDC・SCIM・監査ログ・
 AI モデル自動永続化・整合性自動修復・定期バックアップが**全部背景で動きます**。
@@ -215,7 +229,7 @@ JWT / OIDC Bearer。RBAC 有効時、管理系は `admin` ロール必須。
 
 ```bash
 cd open-runo
-cargo test --workspace     # 176 テスト + doctest が全部通れば OK
+cargo test --workspace     # 192 テスト + doctest が全部通れば OK
 cargo run -p open-runo-gateway   # REST + GraphQL 統合バイナリ起動
 ```
 

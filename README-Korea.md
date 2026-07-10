@@ -40,7 +40,7 @@
 ```bash
 git clone https://github.com/aon-co-jp/open-runo
 cd open-runo
-cargo test --workspace          # 테스트 176개
+cargo test --workspace          # 테스트 192개
 cargo run -p open-runo-gateway  # REST + GraphQL 서버 실행
 ```
 

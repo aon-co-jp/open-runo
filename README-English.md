@@ -1,8 +1,11 @@
-# open-runo
+# poem-cosmo-tauri
 
-**GraphQL Federation platform / web framework built with Rust + Poem**
-— WunderGraph Cosmo's paid-plan features, delivered as OSS.
-Ships with its own self-learning AI (no external LLM contract required).
+**GraphQL Federation platform built with Rust** (Poem/Tauri/Cosmo are never
+direct dependencies — their functionality is hand-implemented for
+compatibility on tokio+hyper) — WunderGraph Cosmo's paid-plan features,
+delivered as OSS. Ships with its own self-learning AI (no external LLM
+contract required). Successor to / consolidation target for the former
+open-runo and poem-runo repositories.
 
 📖 Other languages: [日本語](README-Japan.md) / [中文](README-Chinese.md) /
 [한국어](README-Korea.md) / [Español](README-Spain.md) / [Français](README-France.md) /
@@ -51,15 +54,16 @@ are implemented here in pure Rust — **entirely free, as OSS**.
   verification), export SQL/CSV for Snowflake, unify internal distributed DBs
   via FederatedBackend
 - ⚡ **VersionlessAPI** — a compatibility rule engine that avoids ever creating `/v1 /v2`
-- 🖥️ **Tauri 2 desktop management app** (TypeScript + Bootstrap 5)
+- 🖥️ **Desktop management app** compiled from Rust to WebAssembly (no Tauri,
+  no Node.js, no TypeScript build chain)
 
 ## Quick start
 
 ```bash
-git clone https://github.com/aon-co-jp/open-runo
-cd open-runo
-cargo test --workspace          # 176 tests
-cargo run -p open-runo-gateway  # start the combined REST + GraphQL server
+git clone https://github.com/aon-co-jp/poem-cosmo-tauri
+cd poem-cosmo-tauri
+cargo test --workspace          # 192 tests
+cargo run -p open-runo-gateway  # start the combined REST + GraphQL server (poem-free)
 ```
 
 ```bash
@@ -73,6 +77,22 @@ curl -X POST http://localhost:8080/api/schemas \
      -H 'x-api-key: dev-key' \
      -d '{"service_name":"users","sdl":"type User { id: ID! }"}'
 ```
+
+### Using the management UI (WASM frontend)
+
+`cargo run` alone starts the API server; the management UI it serves at
+`GET /` (`apps/desktop-wasm`) needs a one-time build:
+
+```bash
+rustup target add wasm32-unknown-unknown         # once
+cargo install wasm-bindgen-cli --version 0.2.126  # once (must match Cargo.lock's version)
+make wasm-frontend                                # generates apps/desktop-wasm/www/pkg
+cargo run -p open-runo-gateway                    # now serves the built UI too
+```
+
+Open `http://localhost:8080/` for an 8-page admin UI: Dashboard, Schema
+Registry, Federation, AI Routing, DUAL DATABASE, SCIM, Persisted Queries,
+and Cache & Backup — Rust compiled to WebAssembly, no Tauri/Node.js/TypeScript.
 
 See **[PORTING.md](PORTING.md)** for enabling the AI HTML cache in your own app,
 plus the full list of environment variables and endpoints.
