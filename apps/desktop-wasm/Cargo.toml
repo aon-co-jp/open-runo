@@ -1,0 +1,36 @@
+[workspace]
+
+[package]
+name = "open-runo-desktop-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["open-runo Contributors"]
+license = "Apache-2.0 OR MIT"
+description = "open-runo desktop frontend: Rust compiled to WebAssembly, no Tauri/Node.js/TypeScript build chain."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Document",
+    "Element",
+    "HtmlElement",
+    "Window",
+    "console",
+    "Request",
+    "RequestInit",
+    "RequestMode",
+    "Response",
+    "Headers",
+] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+
+[profile.release]
+opt-level = "s"
+lto = true
