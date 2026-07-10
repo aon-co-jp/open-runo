@@ -987,6 +987,295 @@ pub fn ai_stats_handler(
     })
 }
 
+#[derive(Serialize)]
+struct ExportResponse {
+    written: Vec<String>,
+    records: usize,
+}
+
+/// POST /api/backup/export — poem-free port of `handlers::maintenance::backup_export`.
+pub fn backup_export_handler(
+    state: Arc<AppState>,
+    cache: Arc<crate::middleware::html_cache::HtmlPageCache>,
+    guardian: Arc<KeyGuardian>,
+) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let cache = Arc::clone(&cache);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let config = crate::maintenance::BackupConfig::from_env();
+            let (written, records) = match crate::maintenance::export_backup(&state, &cache, &config).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            crate::audit::record(
+                &state,
+                &actor,
+                "backup.export",
+                format!("{records} records → {}", written.join(", ")),
+            )
+            .await;
+            json_response(StatusCode::OK, &ExportResponse { written, records })
+        })
+    })
+}
+
+#[derive(Deserialize)]
+struct ImportRequest {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ImportResponse {
+    restored: usize,
+}
+
+/// POST /api/backup/import — poem-free port of `handlers::maintenance::backup_import`.
+pub fn backup_import_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let body: ImportRequest = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let restored = match crate::maintenance::import_backup(&state, &body.path).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            crate::audit::record(
+                &state,
+                &actor,
+                "backup.import",
+                format!("{restored} records ← {}", body.path),
+            )
+            .await;
+            json_response(StatusCode::OK, &ImportResponse { restored })
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct IntegrityResponse {
+    backend: &'static str,
+    healed: usize,
+    discrepancies: Vec<open_runo_db::dual::Discrepancy>,
+}
+
+/// POST /api/integrity/check — poem-free port of `handlers::maintenance::integrity_check`.
+pub fn integrity_check_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let discrepancies = match state.db.consistency_check_and_heal().await {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+            for d in &discrepancies {
+                crate::audit::record(
+                    &state,
+                    &actor,
+                    "integrity.heal",
+                    format!("{}/{} {} (from {})", d.table, d.key, d.kind, d.healed_from),
+                )
+                .await;
+            }
+            json_response(
+                StatusCode::OK,
+                &IntegrityResponse {
+                    backend: state.db.backend_name(),
+                    healed: discrepancies.len(),
+                    discrepancies,
+                },
+            )
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct RestoreLatestResponse {
+    restored_from: String,
+    restored: usize,
+}
+
+/// POST /api/backup/restore-latest — poem-free port of
+/// `handlers::maintenance::backup_restore_latest`.
+pub fn backup_restore_latest_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let config = crate::maintenance::BackupConfig::from_env();
+            let path = match crate::maintenance::find_latest_backup(&config) {
+                Some(p) => p,
+                None => {
+                    return json_response(
+                        StatusCode::NOT_FOUND,
+                        &serde_json::json!({ "error": "no backup file found" }),
+                    )
+                }
+            };
+            let path_str = path.display().to_string();
+            let restored = match crate::maintenance::import_backup(&state, &path_str).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            crate::audit::record(
+                &state,
+                &actor,
+                "backup.restore_latest",
+                format!("{restored} records ← {path_str}"),
+            )
+            .await;
+            json_response(
+                StatusCode::OK,
+                &RestoreLatestResponse { restored_from: path_str, restored },
+            )
+        })
+    })
+}
+
+#[derive(Deserialize)]
+struct ExportSqlRequest {
+    dialect: crate::maintenance::SqlDialect,
+}
+
+#[derive(Serialize)]
+struct ConversionResponse {
+    written: Vec<String>,
+}
+
+/// POST /api/migrate/export-sql — poem-free port of
+/// `handlers::maintenance::migrate_export_sql`.
+pub fn migrate_export_sql_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let body: ExportSqlRequest = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            let sql = match crate::maintenance::export_sql(&state, body.dialect).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            let name = format!(
+                "open-runo-dump-{:?}-{}.sql",
+                body.dialect,
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            )
+            .to_lowercase();
+            let written = match crate::maintenance::write_to_backup_dirs(
+                &crate::maintenance::BackupConfig::from_env(),
+                &name,
+                &sql,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            crate::audit::record(&state, &actor, "migrate.export_sql", written.join(", ")).await;
+            json_response(StatusCode::OK, &ConversionResponse { written })
+        })
+    })
+}
+
+/// POST /api/migrate/export-csv — poem-free port of
+/// `handlers::maintenance::migrate_export_csv`.
+pub fn migrate_export_csv_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let csv = match crate::maintenance::export_csv(&state).await {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            let name = format!(
+                "open-runo-dump-{}.csv",
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            );
+            let written = match crate::maintenance::write_to_backup_dirs(
+                &crate::maintenance::BackupConfig::from_env(),
+                &name,
+                &csv,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e }),
+                    )
+                }
+            };
+            crate::audit::record(&state, &actor, "migrate.export_csv", written.join(", ")).await;
+            json_response(StatusCode::OK, &ConversionResponse { written })
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1692,5 +1981,86 @@ mod tests {
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
         let body: serde_json::Value = resp.json().await.expect("valid json body");
         assert_eq!(body["ai_enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn integrity_check_endpoint_responds() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/integrity/check",
+            integrity_check_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/integrity/check"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["healed"], 0);
+    }
+
+    #[tokio::test]
+    async fn backup_export_and_import_roundtrip() {
+        use crate::middleware::html_cache::{HtmlCacheConfig, HtmlPageCache};
+
+        let state = Arc::new(AppState::new());
+        state.schema_registry.lock().unwrap().register_in(
+            "default",
+            "bk",
+            "type B { x: ID }",
+            open_runo_schema_registry::Stage::Local,
+        );
+
+        let guardian = guardian(&state);
+        let cache = Arc::new(HtmlPageCache::new(HtmlCacheConfig::from_env()));
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/backup/export",
+                backup_export_handler(Arc::clone(&state), cache, Arc::clone(&guardian)),
+            )
+            .route(
+                Method::POST,
+                "/api/backup/import",
+                backup_import_handler(Arc::clone(&state), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let dir = std::env::temp_dir().join(format!("orn-hyper-e2e-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("OPEN_RUNO_BACKUP_DIR", &dir);
+
+        let resp = client
+            .post(format!("http://{addr}/api/backup/export"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let path = body["written"][0].as_str().unwrap().to_string();
+        assert!(body["records"].as_u64().unwrap() >= 1);
+
+        let resp = client
+            .post(format!("http://{addr}/api/backup/import"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "path": path }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        std::env::remove_var("OPEN_RUNO_BACKUP_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
