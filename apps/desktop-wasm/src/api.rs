@@ -213,3 +213,40 @@ pub async fn db_delete(table: &str, key: &str) -> Result<(), String> {
     send("DELETE", &format!("/api/db/{table}/{key}"), None).await?;
     Ok(())
 }
+
+#[derive(Debug, Deserialize)]
+pub struct ScimUser {
+    pub id: String,
+    #[serde(rename = "userName")]
+    pub user_name: String,
+    pub active: bool,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScimUserList {
+    #[serde(rename = "totalResults")]
+    pub total_results: usize,
+    #[serde(rename = "Resources")]
+    pub resources: Vec<ScimUser>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScimCreateUserRequest<'a> {
+    #[serde(rename = "userName")]
+    pub user_name: &'a str,
+    pub roles: Vec<&'a str>,
+}
+
+pub async fn scim_list_users() -> Result<ScimUserList, String> {
+    get_json("/scim/v2/Users").await
+}
+
+pub async fn scim_create_user(user_name: &str, roles: Vec<&str>) -> Result<serde_json::Value, String> {
+    post_json("/scim/v2/Users", &ScimCreateUserRequest { user_name, roles }).await
+}
+
+pub async fn scim_delete_user(id: &str) -> Result<(), String> {
+    send("DELETE", &format!("/scim/v2/Users/{id}"), None).await?;
+    Ok(())
+}

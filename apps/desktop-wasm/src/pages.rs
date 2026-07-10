@@ -71,7 +71,7 @@ pub fn mount() {
     };
     let _ = content;
 
-    for page in ["dashboard", "schemas", "federation", "ai-routing", "db"] {
+    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim"] {
         let link_id = format!("nav-{page}");
         on_click(&link_id, move || navigate(page));
     }
@@ -101,6 +101,7 @@ fn navigate(page: &str) {
         "federation" => render_federation(),
         "ai-routing" => render_ai_routing(),
         "db" => render_db(),
+        "scim" => render_scim(),
         _ => {}
     }
 }
@@ -332,6 +333,98 @@ fn render_db() {
             match api::db_delete(&table, &key).await {
                 Ok(()) => set_text("db-record-result", "deleted"),
                 Err(e) => set_text("db-record-result", &format!("failed: {e}")),
+            }
+        });
+    });
+}
+
+fn render_scim() {
+    let Some(content) = content_el() else { return };
+    content.set_inner_html(
+        r#"
+        <h2>SCIM 2.0 Provisioning</h2>
+        <fieldset>
+          <legend>Users</legend>
+          <button id="scim-refresh-btn">Refresh list</button>
+          <pre id="scim-user-list">Loading…</pre>
+        </fieldset>
+        <fieldset>
+          <legend>Create User</legend>
+          <input id="scim-username" placeholder="userName (e.g. alice@example.com)" /><br/>
+          <input id="scim-roles" placeholder="roles (comma-separated, e.g. developer,admin)" /><br/>
+          <button id="scim-create-btn">Create</button>
+          <span id="scim-create-msg"></span>
+        </fieldset>
+        <fieldset>
+          <legend>Delete User</legend>
+          <input id="scim-delete-id" placeholder="user id" />
+          <button id="scim-delete-btn">Delete</button>
+          <span id="scim-delete-msg"></span>
+        </fieldset>
+        "#,
+    );
+
+    fn refresh_list() {
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("scim-user-list", "loading…");
+            match api::scim_list_users().await {
+                Ok(list) => {
+                    let lines: Vec<String> = list
+                        .resources
+                        .iter()
+                        .map(|u| {
+                            format!(
+                                "{} ({}) active={} roles=[{}]",
+                                u.user_name,
+                                u.id,
+                                u.active,
+                                u.roles.join(", ")
+                            )
+                        })
+                        .collect();
+                    set_text(
+                        "scim-user-list",
+                        &format!("total: {}\n{}", list.total_results, lines.join("\n")),
+                    );
+                }
+                Err(e) => set_text("scim-user-list", &format!("failed: {e}")),
+            }
+        });
+    }
+
+    refresh_list();
+    on_click("scim-refresh-btn", refresh_list);
+
+    on_click("scim-create-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let user_name = input_value("scim-username");
+            let roles_raw = input_value("scim-roles");
+            let roles: Vec<&str> = roles_raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
+            set_text("scim-create-msg", "creating…");
+            match api::scim_create_user(&user_name, roles).await {
+                Ok(_) => {
+                    set_text("scim-create-msg", "created");
+                    refresh_list();
+                }
+                Err(e) => set_text("scim-create-msg", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("scim-delete-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let id = input_value("scim-delete-id");
+            set_text("scim-delete-msg", "deleting…");
+            match api::scim_delete_user(&id).await {
+                Ok(()) => {
+                    set_text("scim-delete-msg", "deleted");
+                    refresh_list();
+                }
+                Err(e) => set_text("scim-delete-msg", &format!("failed: {e}")),
             }
         });
     });
