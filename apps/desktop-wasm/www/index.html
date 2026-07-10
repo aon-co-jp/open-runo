@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ja" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>open-runo Desktop</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #14161a;
+        --fg: #e6e6e6;
+        --muted: #9aa0a6;
+        --accent: #4f8cff;
+        --border: #2a2d33;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        display: flex;
+        min-height: 100vh;
+      }
+      #sidebar {
+        width: 220px;
+        min-height: 100vh;
+        border-right: 1px solid var(--border);
+        padding: 1rem;
+        flex-shrink: 0;
+      }
+      #sidebar h1 {
+        font-size: 1rem;
+        margin: 0 0 0.5rem;
+        color: var(--accent);
+      }
+      #content {
+        flex: 1;
+        padding: 1.5rem;
+      }
+    </style>
+  </head>
+  <body>
+    <nav id="sidebar">
+      <h1>open-runo</h1>
+      <p style="color: var(--muted); font-size: 0.8rem;">Rust + WebAssembly</p>
+    </nav>
+    <main id="app-root">
+      <div id="content">Loading…</div>
+    </main>
+    <script type="module">
+      import init from "./pkg/open_runo_desktop_wasm.js";
+      init();
+    </script>
+  </body>
+</html>

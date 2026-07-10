@@ -25,28 +25,25 @@ fn console_log(msg: &str) {
     web_sys::console::log_1(&JsValue::from_str(msg));
 }
 
-/// Build the minimal page shell (sidebar + content area) and kick off the
-/// initial health-check render. Equivalent to the old `main.ts`'s startup,
-/// but written in Rust and driven by `web_sys` DOM calls instead of a
-/// TypeScript bundler output.
+/// Find the page's `#content` element (owned by the host HTML — see
+/// `www/index.html`) and kick off the initial health-check render.
+/// Equivalent to the old `main.ts`'s startup, but written in Rust and
+/// driven by `web_sys` DOM calls instead of a TypeScript bundler output.
 fn mount_shell() {
-    let window = web_sys::window().expect("no global `window`");
-    let document = window.document().expect("no `document` on window");
-
-    let Some(body) = document.body() else {
-        console_log("no <body> element found; aborting mount");
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+        console_log("no `document` on window; aborting mount");
         return;
     };
 
-    let content = document
-        .create_element("div")
-        .expect("failed to create content div");
-    content.set_id("content");
-    content.set_text_content(Some("Loading…"));
-    body.append_child(&content).expect("failed to mount content div");
+    if document.get_element_by_id("content").is_none() {
+        console_log("host HTML is missing a #content element; aborting mount");
+        return;
+    }
 
     wasm_bindgen_futures::spawn_local(async move {
-        let document = web_sys::window().unwrap().document().unwrap();
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
+            return;
+        };
         let Some(content) = document.get_element_by_id("content") else {
             return;
         };
