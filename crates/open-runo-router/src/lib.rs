@@ -33,6 +33,7 @@ pub mod hyper_compat;
 pub mod keyring;
 pub mod maintenance;
 pub mod middleware;
+pub mod middleware_hyper;
 pub mod rate_limit;
 pub mod state;
 pub mod validation;
