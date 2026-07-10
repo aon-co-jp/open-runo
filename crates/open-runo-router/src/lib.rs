@@ -414,10 +414,18 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
 /// `apps/desktop-wasm/www` relative to the current working directory
 /// (the convention for `cargo run` from the repo root); override with
 /// `OPEN_RUNO_STATIC_DIR` for other layouts (e.g. a packaged deploy).
+/// Falls back to a `poem-cosmo-tauri/`-prefixed variant for launchers
+/// that run `cargo run --manifest-path poem-cosmo-tauri/Cargo.toml`
+/// from a parent directory (e.g. this repo's sibling-checkout layout).
 fn static_dir() -> std::path::PathBuf {
-    std::env::var("OPEN_RUNO_STATIC_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("apps/desktop-wasm/www"))
+    if let Ok(dir) = std::env::var("OPEN_RUNO_STATIC_DIR") {
+        return std::path::PathBuf::from(dir);
+    }
+    let direct = std::path::PathBuf::from("apps/desktop-wasm/www");
+    if direct.join("index.html").exists() {
+        return direct;
+    }
+    std::path::PathBuf::from("poem-cosmo-tauri/apps/desktop-wasm/www")
 }
 
 #[cfg(test)]
