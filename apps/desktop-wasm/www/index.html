@@ -34,16 +34,51 @@
         margin: 0 0 0.5rem;
         color: var(--accent);
       }
+      #sidebar-nav {
+        list-style: none;
+        margin: 1rem 0 0;
+        padding: 0;
+      }
+      #sidebar-nav li { margin-bottom: 0.25rem; }
+      #sidebar-nav a {
+        display: block;
+        padding: 0.4rem 0.6rem;
+        border-radius: 0.3rem;
+        color: var(--muted);
+        text-decoration: none;
+        cursor: pointer;
+      }
+      #sidebar-nav a[data-active="true"] {
+        color: var(--fg);
+        background: #1f2229;
+      }
       #content {
         flex: 1;
         padding: 1.5rem;
       }
+      fieldset { border: 1px solid var(--border); border-radius: 0.3rem; margin-bottom: 1rem; }
+      input, select, textarea, button {
+        background: #1f2229;
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 0.25rem;
+        padding: 0.3rem 0.5rem;
+        margin: 0.2rem 0;
+      }
+      button { cursor: pointer; color: var(--accent); }
+      pre { white-space: pre-wrap; word-break: break-word; }
     </style>
   </head>
   <body>
     <nav id="sidebar">
       <h1>open-runo</h1>
       <p style="color: var(--muted); font-size: 0.8rem;">Rust + WebAssembly</p>
+      <ul id="sidebar-nav">
+        <li><a id="nav-dashboard" data-active="true">Dashboard</a></li>
+        <li><a id="nav-schemas">Schema Registry</a></li>
+        <li><a id="nav-federation">Federation</a></li>
+        <li><a id="nav-ai-routing">AI Routing</a></li>
+      </ul>
     </nav>
     <main id="app-root">
       <div id="content">Loading…</div>

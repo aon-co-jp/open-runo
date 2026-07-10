@@ -2,12 +2,19 @@
 //!
 //! Poem-free/Tauri-free equivalent of the old `src/api/client.ts`
 //! `invoke()`-style helpers: plain async Rust functions that `fetch()` the
-//! backend directly, decoding JSON via `serde`.
+//! backend directly, decoding JSON via `serde`. No IPC bridge to a separate
+//! host process — the WASM bundle and the API it calls are served by the
+//! same `open-runo-router` binary, so this is a same-origin call.
 
-use serde::Deserialize;
-use wasm_bindgen::JsCast;
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
+
+/// Dev-mode API key. `open-runo-router`'s KeyGuardian accepts any
+/// non-empty key while its registry is empty (see `auth_hyper.rs`); a
+/// real deployment would source this from a login flow instead.
+const DEV_API_KEY: &str = "open-runo-desktop-wasm";
 
 #[derive(Debug, Deserialize)]
 pub struct Health {
@@ -16,19 +23,91 @@ pub struct Health {
     pub version: String,
 }
 
+#[derive(Debug, Serialize)]
+pub struct RegisterSchemaRequest<'a> {
+    pub service_name: &'a str,
+    pub sdl: &'a str,
+    pub stage: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterSchemaResponse {
+    pub id: String,
+    pub namespace: String,
+    pub service_name: String,
+    pub stage: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SchemaVersion {
+    pub id: String,
+    pub service_name: String,
+    pub stage: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SchemaHistoryResponse {
+    pub versions: Vec<SchemaVersion>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FederationStatusResponse {
+    pub contributing_services: Vec<String>,
+    pub type_count: usize,
+    pub field_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiRouteCandidate<'a> {
+    pub provider: &'a str,
+    pub estimated_cost_usd_per_1k_tokens: f64,
+    pub estimated_latency_ms: u32,
+    pub is_local: bool,
+    pub context_length: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AiRouteRequest<'a> {
+    pub policy: &'a str,
+    pub candidates: Vec<AiRouteCandidate<'a>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AiRouteResponse {
+    pub selected_provider: String,
+    pub is_local: bool,
+    pub estimated_cost_usd_per_1k_tokens: f64,
+    pub estimated_latency_ms: u32,
+}
+
 /// Base URL for API calls. Empty string means same-origin (the WASM
 /// bundle is served by the same open-runo-router binary it talks to).
 fn base_url() -> &'static str {
     ""
 }
 
-async fn get_json<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
+async fn send(method: &str, path: &str, body: Option<&str>) -> Result<JsValue, String> {
     let opts = RequestInit::new();
-    opts.set_method("GET");
+    opts.set_method(method);
     opts.set_mode(RequestMode::SameOrigin);
+    if let Some(body) = body {
+        opts.set_body(&JsValue::from_str(body));
+    }
 
     let url = format!("{}{path}", base_url());
     let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("{e:?}"))?;
+    request
+        .headers()
+        .set("x-api-key", DEV_API_KEY)
+        .map_err(|e| format!("{e:?}"))?;
+    if body.is_some() {
+        request
+            .headers()
+            .set("content-type", "application/json")
+            .map_err(|e| format!("{e:?}"))?;
+    }
 
     let window = web_sys::window().ok_or("no window")?;
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
@@ -40,13 +119,52 @@ async fn get_json<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String>
         return Err(format!("HTTP {}", resp.status()));
     }
 
-    let json = JsFuture::from(resp.json().map_err(|e| format!("{e:?}"))?)
+    JsFuture::from(resp.json().map_err(|e| format!("{e:?}"))?)
         .await
-        .map_err(|e| format!("body read error: {e:?}"))?;
+        .map_err(|e| format!("body read error: {e:?}"))
+}
 
+async fn get_json<T: for<'de> Deserialize<'de>>(path: &str) -> Result<T, String> {
+    let json = send("GET", path, None).await?;
+    serde_wasm_bindgen::from_value(json).map_err(|e| format!("decode error: {e}"))
+}
+
+async fn post_json<T: for<'de> Deserialize<'de>>(
+    path: &str,
+    body: &impl Serialize,
+) -> Result<T, String> {
+    let body = serde_json::to_string(body).map_err(|e| format!("encode error: {e}"))?;
+    let json = send("POST", path, Some(&body)).await?;
     serde_wasm_bindgen::from_value(json).map_err(|e| format!("decode error: {e}"))
 }
 
 pub async fn health_check() -> Result<Health, String> {
     get_json::<Health>("/health").await
+}
+
+pub async fn register_schema(
+    service_name: &str,
+    sdl: &str,
+    stage: &str,
+) -> Result<RegisterSchemaResponse, String> {
+    post_json(
+        "/api/schemas",
+        &RegisterSchemaRequest { service_name, sdl, stage },
+    )
+    .await
+}
+
+pub async fn get_schema_history(service: &str) -> Result<SchemaHistoryResponse, String> {
+    get_json(&format!("/api/schemas/{service}/history")).await
+}
+
+pub async fn federation_status() -> Result<FederationStatusResponse, String> {
+    get_json("/api/federation/status").await
+}
+
+pub async fn ai_route(
+    policy: &str,
+    candidates: Vec<AiRouteCandidate<'_>>,
+) -> Result<AiRouteResponse, String> {
+    post_json("/api/ai/route", &AiRouteRequest { policy, candidates }).await
 }
