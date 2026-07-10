@@ -194,6 +194,26 @@ pub fn health_handler() -> Handler {
     })
 }
 
+/// Serve a single static file from disk at request time, with a fixed
+/// `content-type`. Used to host the WASM frontend bundle (`www/index.html`,
+/// `www/pkg/*.js`, `www/pkg/*.wasm`) directly from `open-runo-router` —
+/// no separate static-file server or Node.js tooling required.
+pub fn static_file_handler(path: std::path::PathBuf, content_type: &'static str) -> Handler {
+    Arc::new(move |_req, _params| {
+        let path = path.clone();
+        Box::pin(async move {
+            match tokio::fs::read(&path).await {
+                Ok(bytes) => HyperResponse::builder()
+                    .status(StatusCode::OK)
+                    .header("content-type", content_type)
+                    .body(fixed_body(Bytes::from(bytes)))
+                    .expect("building a response from a fixed set of valid headers cannot fail"),
+                Err(_) => empty_status(StatusCode::NOT_FOUND),
+            }
+        })
+    })
+}
+
 /// Serve `router` over a real TCP listener; returns the bound address and a
 /// task handle. Used by tests (and, eventually, `main.rs`) to run the
 /// poem-free stack end to end.
@@ -421,5 +441,39 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_file_handler_serves_existing_file_and_404s_missing() {
+        let dir = std::env::temp_dir().join(format!("orn-static-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file_path = dir.join("hello.txt");
+        std::fs::write(&file_path, b"hello static world").unwrap();
+
+        let router = Router::new()
+            .route(Method::GET, "/hello.txt", static_file_handler(file_path.clone(), "text/plain"))
+            .route(Method::GET, "/missing.txt", static_file_handler(dir.join("missing.txt"), "text/plain"));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("http://{addr}/hello.txt"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(resp.headers().get("content-type").unwrap(), "text/plain");
+        assert_eq!(resp.text().await.unwrap(), "hello static world");
+
+        let resp = client
+            .get(format!("http://{addr}/missing.txt"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

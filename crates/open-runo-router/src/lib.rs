@@ -380,6 +380,44 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
             "/api/events",
             wrap(handlers_hyper::stream_events_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
+        // ── WASM frontend bundle (apps/desktop-wasm/www) ─────────────────
+        // Directory is configurable via OPEN_RUNO_STATIC_DIR so the
+        // binary can be run from any working directory; defaults to the
+        // conventional path relative to the repo root (dev convenience).
+        .route(
+            Method::GET,
+            "/",
+            wrap(hyper_compat::static_file_handler(
+                static_dir().join("index.html"),
+                "text/html; charset=utf-8",
+            )),
+        )
+        .route(
+            Method::GET,
+            "/pkg/open_runo_desktop_wasm.js",
+            wrap(hyper_compat::static_file_handler(
+                static_dir().join("pkg/open_runo_desktop_wasm.js"),
+                "text/javascript",
+            )),
+        )
+        .route(
+            Method::GET,
+            "/pkg/open_runo_desktop_wasm_bg.wasm",
+            wrap(hyper_compat::static_file_handler(
+                static_dir().join("pkg/open_runo_desktop_wasm_bg.wasm"),
+                "application/wasm",
+            )),
+        )
+}
+
+/// Resolve the WASM frontend's static asset directory. Defaults to
+/// `apps/desktop-wasm/www` relative to the current working directory
+/// (the convention for `cargo run` from the repo root); override with
+/// `OPEN_RUNO_STATIC_DIR` for other layouts (e.g. a packaged deploy).
+fn static_dir() -> std::path::PathBuf {
+    std::env::var("OPEN_RUNO_STATIC_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("apps/desktop-wasm/www"))
 }
 
 #[cfg(test)]
