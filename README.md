@@ -148,6 +148,7 @@ feature フラグで選択。「マネージド版でしか使えない機能」
 
 [docs/architecture.md](docs/architecture.md) — 全体設計 ·
 [docs/cosmo-parity.md](docs/cosmo-parity.md) — Cosmo 機能対応表 ·
+[docs/poem-parity.md](docs/poem-parity.md) — Poem 機能対応表 ·
 [docs/migration.md](docs/migration.md) — お引越し/変換/統合 ·
 [docs/api-spec.md](docs/api-spec.md) — API 仕様 ·
 [docs/security.md](docs/security.md) — セキュリティ ·

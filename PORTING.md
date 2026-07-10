@@ -209,7 +209,8 @@ curl -X POST -H "x-api-key: $KEY" http://new:8080/api/backup/restore-latest
 | Path | 用途 |
 |------|------|
 | `/health` `/healthz` | 認証不要ヘルスチェック |
-| `/graphql` (+`/graphql/ws`) | Federation GraphQL / Subscriptions |
+| `/api/openapi.json` | REST APIのOpenAPI 3.0仕様(認証不要、Postman/Insomnia/Swagger UIへインポート可) |
+| `/graphql` (+`/graphql/ws`) | Federation GraphQL / Subscriptions(GraphiQLは`GET /graphql`) |
 | `/api/schemas*`（`?namespace=`） | Schema Registry（マルチグラフ対応） |
 | `/api/federation/*` | 合成・状態 |
 | `/api/persisted-queries*` | Trusted Documents 登録・取得 |
