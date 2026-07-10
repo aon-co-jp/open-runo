@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "open-runo Gateway Router: Poem-based HTTP entrypoint, health checks, and middleware pipeline"
+description = "open-runo Gateway Router: tokio/hyper HTTP entrypoint, health checks, and middleware pipeline (poem remains only as an internal dependency of the HTML page-cache middleware)"
 
 [lints]
 workspace = true

@@ -3,8 +3,6 @@
 //! trail is immutable-by-history (Cosmo Enterprise compliance parity).
 
 use crate::state::AppState;
-use open_runo_security::Claims;
-use poem::Request;
 use serde::Serialize;
 
 /// One audit trail entry, stored as JSON under a UUID key.
@@ -14,19 +12,6 @@ pub struct AuditRecord {
     pub action: String,
     pub target: String,
     pub at: String,
-}
-
-/// Identify the caller: JWT subject when present (set by `ApiKeyAuth`),
-/// otherwise a masked API-key prefix, otherwise `anonymous`.
-pub fn actor_from(req: &Request) -> String {
-    if let Some(claims) = req.extensions().get::<Claims>() {
-        return format!("jwt:{}", claims.sub);
-    }
-    if let Some(key) = req.header("x-api-key") {
-        let prefix: String = key.chars().take(4).collect();
-        return format!("api-key:{prefix}***");
-    }
-    "anonymous".to_string()
 }
 
 /// Write an audit record. Failures are logged, never propagated — an audit

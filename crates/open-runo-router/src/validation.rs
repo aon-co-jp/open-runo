@@ -8,7 +8,6 @@
 
 use jsonschema::Validator;
 use once_cell::sync::Lazy;
-use poem::{http::StatusCode, Error};
 use serde_json::Value;
 
 /// Compile a JSON Schema (as a `serde_json::Value`) into a reusable
@@ -39,9 +38,11 @@ pub static DB_UPSERT_REQUEST: Lazy<Validator> = Lazy::new(|| {
     }))
 });
 
-/// Validate `body` against `validator`, returning a `422` [`poem::Error`]
-/// listing every violation when it fails.
-pub fn validate(validator: &Validator, body: &Value) -> Result<(), Error> {
+/// Validate `body` against `validator`, returning a readable list of
+/// violations (joined with `; `) when it fails. Poem-free: callers turn
+/// the `Err` string into whatever response type they need (hyper_compat
+/// handlers use `StatusCode::UNPROCESSABLE_ENTITY`, see `handlers_hyper.rs`).
+pub fn validate(validator: &Validator, body: &Value) -> Result<(), String> {
     let errors: Vec<String> = validator
         .iter_errors(body)
         .map(|e| format!("{} (at {})", e, e.instance_path))
@@ -50,10 +51,7 @@ pub fn validate(validator: &Validator, body: &Value) -> Result<(), Error> {
     if errors.is_empty() {
         Ok(())
     } else {
-        Err(Error::from_string(
-            format!("request body failed validation: {}", errors.join("; ")),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ))
+        Err(format!("request body failed validation: {}", errors.join("; ")))
     }
 }
 
