@@ -5,12 +5,31 @@
 //! matching the JSON shape/status codes of its poem counterpart exactly.
 
 use crate::auth_hyper::check_api_key;
-use crate::hyper_compat::{empty_status, json_response, Handler};
+use crate::hyper_compat::{empty_status, json_response, query_params, Handler};
 use crate::keyring::KeyGuardian;
 use crate::state::AppState;
 use hyper::StatusCode;
+use open_runo_schema_registry::{Stage, DEFAULT_NAMESPACE};
 use serde::Serialize;
 use std::sync::Arc;
+
+fn parse_stage(s: &str) -> Stage {
+    match s.to_lowercase().as_str() {
+        "development" | "dev" => Stage::Development,
+        "staging" | "stg" => Stage::Staging,
+        "production" | "prod" => Stage::Production,
+        _ => Stage::Local,
+    }
+}
+
+fn stage_name(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Local => "local",
+        Stage::Development => "development",
+        Stage::Staging => "staging",
+        Stage::Production => "production",
+    }
+}
 
 #[derive(Serialize)]
 struct FederationStatusResponse {
@@ -115,6 +134,107 @@ pub fn db_routing_handler(guardian: Arc<KeyGuardian>) -> Handler {
                     entries,
                 },
             )
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct SchemaResponse {
+    id: String,
+    namespace: String,
+    service_name: String,
+    sdl: String,
+    stage: String,
+    created_at: String,
+}
+
+/// GET /api/schemas/:service — poem-free port of `handlers::schemas::get_schema`.
+pub fn get_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let query = query_params(&req);
+            let service = params.get("service").unwrap_or("").to_string();
+            let stage_str = query.get("stage").map(String::as_str).unwrap_or("local");
+            let stage = parse_stage(stage_str);
+            let namespace = query
+                .get("namespace")
+                .map(String::as_str)
+                .unwrap_or(DEFAULT_NAMESPACE);
+
+            let registry = state
+                .schema_registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            match registry.latest_in(namespace, &service, stage) {
+                Some(v) => json_response(
+                    StatusCode::OK,
+                    &SchemaResponse {
+                        id: v.id.to_string(),
+                        namespace: v.namespace.clone(),
+                        service_name: v.service_name.clone(),
+                        sdl: v.sdl.clone(),
+                        stage: stage_name(v.stage).to_string(),
+                        created_at: v.created_at.to_rfc3339(),
+                    },
+                ),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({
+                        "error": format!("no schema found for '{service}' at stage '{stage_str}'")
+                    }),
+                ),
+            }
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct HistoryResponse {
+    versions: Vec<SchemaResponse>,
+}
+
+/// GET /api/schemas/:service/history — poem-free port of
+/// `handlers::schemas::get_schema_history`.
+pub fn get_schema_history_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let query = query_params(&req);
+            let service = params.get("service").unwrap_or("").to_string();
+            let namespace = query
+                .get("namespace")
+                .map(String::as_str)
+                .unwrap_or(DEFAULT_NAMESPACE);
+
+            let registry = state
+                .schema_registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+            let versions = registry
+                .history_in(namespace, &service)
+                .iter()
+                .map(|v| SchemaResponse {
+                    id: v.id.to_string(),
+                    namespace: v.namespace.clone(),
+                    service_name: v.service_name.clone(),
+                    sdl: v.sdl.clone(),
+                    stage: stage_name(v.stage).to_string(),
+                    created_at: v.created_at.to_rfc3339(),
+                })
+                .collect();
+
+            json_response(StatusCode::OK, &HistoryResponse { versions })
         })
     })
 }
@@ -258,5 +378,113 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_schema_returns_registered_version() {
+        use open_runo_schema_registry::Stage;
+
+        let state = Arc::new(AppState::new());
+        state
+            .schema_registry
+            .lock()
+            .unwrap()
+            .register_in("default", "users", "type User { id: ID! }", Stage::Local);
+
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::GET,
+            "/api/schemas/:service",
+            get_schema_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/schemas/users"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["service_name"], "users");
+        assert_eq!(body["sdl"], "type User { id: ID! }");
+    }
+
+    #[tokio::test]
+    async fn get_schema_missing_service_returns_404() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::GET,
+            "/api/schemas/:service",
+            get_schema_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/schemas/nonexistent"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn get_schema_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::GET,
+            "/api/schemas/:service",
+            get_schema_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/schemas/users"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn get_schema_history_returns_all_versions() {
+        use open_runo_schema_registry::Stage;
+
+        let state = Arc::new(AppState::new());
+        {
+            let mut registry = state.schema_registry.lock().unwrap();
+            registry.register_in("default", "users", "type User { id: ID! }", Stage::Local);
+            registry.register_in("default", "users", "type User { id: ID! name: String }", Stage::Local);
+        }
+
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::GET,
+            "/api/schemas/:service/history",
+            get_schema_history_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/schemas/users/history"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["versions"].as_array().unwrap().len(), 2);
     }
 }
