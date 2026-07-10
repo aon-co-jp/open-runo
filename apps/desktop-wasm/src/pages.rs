@@ -71,7 +71,7 @@ pub fn mount() {
     };
     let _ = content;
 
-    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim"] {
+    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim", "persisted-queries"] {
         let link_id = format!("nav-{page}");
         on_click(&link_id, move || navigate(page));
     }
@@ -102,6 +102,7 @@ fn navigate(page: &str) {
         "ai-routing" => render_ai_routing(),
         "db" => render_db(),
         "scim" => render_scim(),
+        "persisted-queries" => render_persisted_queries(),
         _ => {}
     }
 }
@@ -425,6 +426,52 @@ fn render_scim() {
                     refresh_list();
                 }
                 Err(e) => set_text("scim-delete-msg", &format!("failed: {e}")),
+            }
+        });
+    });
+}
+
+fn render_persisted_queries() {
+    let Some(content) = content_el() else { return };
+    content.set_inner_html(
+        r#"
+        <h2>Persisted Queries / Trusted Documents</h2>
+        <fieldset>
+          <legend>Register document</legend>
+          <textarea id="pq-query" rows="3" placeholder="{ health }"></textarea><br/>
+          <button id="pq-register-btn">Register</button>
+          <pre id="pq-register-result"></pre>
+        </fieldset>
+        <fieldset>
+          <legend>Fetch by hash</legend>
+          <input id="pq-hash" placeholder="sha256 hash" />
+          <button id="pq-fetch-btn">Fetch</button>
+          <pre id="pq-fetch-result"></pre>
+        </fieldset>
+        "#,
+    );
+
+    on_click("pq-register-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let query = textarea_value("pq-query");
+            set_text("pq-register-result", "registering…");
+            match api::register_persisted_query(&query).await {
+                Ok(r) => set_text(
+                    "pq-register-result",
+                    &format!("hash: {}\nregistered_at: {}", r.hash, r.registered_at),
+                ),
+                Err(e) => set_text("pq-register-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("pq-fetch-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let hash = input_value("pq-hash");
+            set_text("pq-fetch-result", "loading…");
+            match api::get_persisted_query(&hash).await {
+                Ok(r) => set_text("pq-fetch-result", &format!("query: {}\nregistered_at: {}", r.query, r.registered_at)),
+                Err(e) => set_text("pq-fetch-result", &format!("failed: {e}")),
             }
         });
     });

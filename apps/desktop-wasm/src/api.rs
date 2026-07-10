@@ -250,3 +250,29 @@ pub async fn scim_delete_user(id: &str) -> Result<(), String> {
     send("DELETE", &format!("/scim/v2/Users/{id}"), None).await?;
     Ok(())
 }
+
+#[derive(Debug, Serialize)]
+struct PqRegisterRequest<'a> {
+    query: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PqRegisterResponse {
+    pub hash: String,
+    pub registered_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PqQueryResponse {
+    pub hash: String,
+    pub query: String,
+    pub registered_at: String,
+}
+
+pub async fn register_persisted_query(query: &str) -> Result<PqRegisterResponse, String> {
+    post_json("/api/persisted-queries", &PqRegisterRequest { query }).await
+}
+
+pub async fn get_persisted_query(hash: &str) -> Result<PqQueryResponse, String> {
+    get_json(&format!("/api/persisted-queries/{hash}")).await
+}
