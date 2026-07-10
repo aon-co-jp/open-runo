@@ -1276,6 +1276,371 @@ pub fn migrate_export_csv_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
     })
 }
 
+fn scim_user_store(state: &AppState) -> open_runo_scim::ScimUserStore {
+    open_runo_scim::ScimUserStore::new(Arc::clone(&state.db))
+}
+
+fn scim_group_store(state: &AppState) -> open_runo_scim::ScimGroupStore {
+    open_runo_scim::ScimGroupStore::new(Arc::clone(&state.db))
+}
+
+/// GET /scim/v2/Users — poem-free port of `handlers::scim::list_users`.
+pub fn scim_list_users_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let query = query_params(&req);
+            let filter = query
+                .get("filter")
+                .and_then(|f| open_runo_scim::ScimUserStore::parse_user_name_filter(f));
+
+            match scim_user_store(&state).list(filter.as_deref()).await {
+                Ok(users) => json_response(
+                    StatusCode::OK,
+                    &open_runo_scim::ListResponse {
+                        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".into()],
+                        total_results: users.len(),
+                        resources: users,
+                    },
+                ),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+/// POST /scim/v2/Users — poem-free port of `handlers::scim::create_user`,
+/// including KeyGuardian's auto-issue on provisioning.
+pub fn scim_create_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let input: open_runo_scim::UserInput = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let user = match scim_user_store(&state).create(input).await {
+                Ok(u) => u,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::CONFLICT,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+
+            crate::audit::record(&state, &actor, "scim.user.create", user.user_name.clone()).await;
+
+            let mut body = match serde_json::to_value(&user) {
+                Ok(v) => v,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+            match guardian.issue(&user.user_name, user.roles.clone(), None).await {
+                Ok(plaintext) => {
+                    body["urn:open-runo:params:scim:api-key"] = serde_json::Value::String(plaintext);
+                    crate::audit::record(&state, "key-guardian", "key.auto_issue", user.user_name.clone()).await;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, owner = %user.user_name, "auto key issue failed");
+                }
+            }
+
+            json_response(StatusCode::CREATED, &body)
+        })
+    })
+}
+
+/// GET /scim/v2/Users/:id — poem-free port of `handlers::scim::get_user`.
+pub fn scim_get_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let id = params.get("id").unwrap_or("").to_string();
+            match scim_user_store(&state).get(&id).await {
+                Ok(Some(user)) => json_response(StatusCode::OK, &user),
+                Ok(None) => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("user not found: {id}") }),
+                ),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+/// PUT /scim/v2/Users/:id — poem-free port of `handlers::scim::replace_user`,
+/// including KeyGuardian's auto-revoke on deactivation.
+pub fn scim_replace_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let id = params.get("id").unwrap_or("").to_string();
+            let input: open_runo_scim::UserInput = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let user = match scim_user_store(&state).replace(&id, input).await {
+                Ok(u) => u,
+                Err(e) => {
+                    let msg = e.to_string();
+                    let status = if msg.contains("not found") {
+                        StatusCode::NOT_FOUND
+                    } else {
+                        StatusCode::CONFLICT
+                    };
+                    return json_response(status, &serde_json::json!({ "error": msg }));
+                }
+            };
+
+            crate::audit::record(&state, &actor, "scim.user.replace", user.user_name.clone()).await;
+
+            if !user.active {
+                if let Ok(n) = guardian.revoke_owner(&user.user_name).await {
+                    if n > 0 {
+                        crate::audit::record(
+                            &state,
+                            "key-guardian",
+                            "key.auto_revoke",
+                            format!("{} ({n} keys, deactivated)", user.user_name),
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            json_response(StatusCode::OK, &user)
+        })
+    })
+}
+
+/// DELETE /scim/v2/Users/:id — poem-free port of `handlers::scim::delete_user`,
+/// including KeyGuardian's auto-revoke on deletion.
+pub fn scim_delete_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let id = params.get("id").unwrap_or("").to_string();
+
+            let owner = match scim_user_store(&state).get(&id).await {
+                Ok(u) => u.map(|u| u.user_name),
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+
+            if let Err(e) = scim_user_store(&state).delete(&id).await {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                );
+            }
+
+            crate::audit::record(&state, &actor, "scim.user.delete", id).await;
+
+            if let Some(owner) = owner {
+                if let Ok(n) = guardian.revoke_owner(&owner).await {
+                    if n > 0 {
+                        crate::audit::record(
+                            &state,
+                            "key-guardian",
+                            "key.auto_revoke",
+                            format!("{owner} ({n} keys, deleted)"),
+                        )
+                        .await;
+                    }
+                }
+            }
+
+            empty_status(StatusCode::NO_CONTENT)
+        })
+    })
+}
+
+/// GET /scim/v2/Groups — poem-free port of `handlers::scim::list_groups`.
+pub fn scim_list_groups_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let query = query_params(&req);
+            let filter = query
+                .get("filter")
+                .and_then(|f| open_runo_scim::ScimGroupStore::parse_display_name_filter(f));
+
+            match scim_group_store(&state).list(filter.as_deref()).await {
+                Ok(groups) => json_response(
+                    StatusCode::OK,
+                    &open_runo_scim::GroupListResponse {
+                        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".into()],
+                        total_results: groups.len(),
+                        resources: groups,
+                    },
+                ),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+/// POST /scim/v2/Groups — poem-free port of `handlers::scim::create_group`.
+pub fn scim_create_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let input: open_runo_scim::GroupInput = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            match scim_group_store(&state).create(input).await {
+                Ok(group) => {
+                    crate::audit::record(&state, &actor, "scim.group.create", group.display_name.clone()).await;
+                    json_response(StatusCode::CREATED, &group)
+                }
+                Err(e) => json_response(
+                    StatusCode::CONFLICT,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+/// GET /scim/v2/Groups/:id — poem-free port of `handlers::scim::get_group`.
+pub fn scim_get_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let id = params.get("id").unwrap_or("").to_string();
+            match scim_group_store(&state).get(&id).await {
+                Ok(Some(group)) => json_response(StatusCode::OK, &group),
+                Ok(None) => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("group not found: {id}") }),
+                ),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+/// PUT /scim/v2/Groups/:id — poem-free port of `handlers::scim::replace_group`.
+pub fn scim_replace_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let id = params.get("id").unwrap_or("").to_string();
+            let input: open_runo_scim::GroupInput = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            match scim_group_store(&state).replace(&id, input).await {
+                Ok(group) => {
+                    crate::audit::record(&state, &actor, "scim.group.replace", group.display_name.clone()).await;
+                    json_response(StatusCode::OK, &group)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let status = if msg.contains("not found") {
+                        StatusCode::NOT_FOUND
+                    } else {
+                        StatusCode::CONFLICT
+                    };
+                    json_response(status, &serde_json::json!({ "error": msg }))
+                }
+            }
+        })
+    })
+}
+
+/// DELETE /scim/v2/Groups/:id — poem-free port of `handlers::scim::delete_group`.
+pub fn scim_delete_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let id = params.get("id").unwrap_or("").to_string();
+
+            if let Err(e) = scim_group_store(&state).delete(&id).await {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                );
+            }
+
+            crate::audit::record(&state, &actor, "scim.group.delete", id).await;
+            empty_status(StatusCode::NO_CONTENT)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2062,5 +2427,206 @@ mod tests {
 
         std::env::remove_var("OPEN_RUNO_BACKUP_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn scim_router(state: &Arc<AppState>, guardian: Arc<KeyGuardian>) -> Router {
+        Router::new()
+            .route(Method::GET, "/scim/v2/Users", scim_list_users_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::POST, "/scim/v2/Users", scim_create_user_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::GET, "/scim/v2/Users/:id", scim_get_user_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::PUT, "/scim/v2/Users/:id", scim_replace_user_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::DELETE, "/scim/v2/Users/:id", scim_delete_user_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::GET, "/scim/v2/Groups", scim_list_groups_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::POST, "/scim/v2/Groups", scim_create_group_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::GET, "/scim/v2/Groups/:id", scim_get_group_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::PUT, "/scim/v2/Groups/:id", scim_replace_group_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::DELETE, "/scim/v2/Groups/:id", scim_delete_group_handler(Arc::clone(state), guardian))
+    }
+
+    #[tokio::test]
+    async fn scim_user_lifecycle_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = scim_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+        let key = "x-api-key";
+
+        let resp = client
+            .post(format!("http://{addr}/scim/v2/Users"))
+            .header(key, "test-key")
+            .json(&serde_json::json!({
+                "userName": "alice@example.com",
+                "displayName": "Alice",
+                "emails": [{ "value": "alice@example.com", "primary": true }],
+                "roles": ["developer"]
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert_eq!(body["userName"], "alice@example.com");
+        assert_eq!(body["meta"]["resourceType"], "User");
+
+        let issued = body["urn:open-runo:params:scim:api-key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = client
+            .post(format!("http://{addr}/scim/v2/Users"))
+            .header(key, &issued)
+            .json(&serde_json::json!({ "userName": "alice@example.com" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::CONFLICT);
+
+        let resp = client
+            .get(format!("http://{addr}/scim/v2/Users"))
+            .query(&[("filter", r#"userName eq "alice@example.com""#)])
+            .header(key, &issued)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["totalResults"], 1);
+
+        let resp = client
+            .put(format!("http://{addr}/scim/v2/Users/{id}"))
+            .header(key, &issued)
+            .json(&serde_json::json!({ "userName": "alice@example.com", "active": false }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["active"], false);
+
+        let resp = client
+            .get(format!("http://{addr}/scim/v2/Users/{id}"))
+            .header(key, &issued)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn scim_group_lifecycle_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = scim_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+        let key = "x-api-key";
+
+        let resp = client
+            .post(format!("http://{addr}/scim/v2/Groups"))
+            .header(key, "test-key")
+            .json(&serde_json::json!({
+                "displayName": "engineering",
+                "members": [{ "value": "user-1", "display": "Alice" }]
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert_eq!(body["meta"]["resourceType"], "Group");
+
+        let resp = client
+            .put(format!("http://{addr}/scim/v2/Groups/{id}"))
+            .header(key, "test-key")
+            .json(&serde_json::json!({
+                "displayName": "engineering",
+                "members": [{ "value": "user-1" }, { "value": "user-2" }]
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["members"].as_array().unwrap().len(), 2);
+
+        let resp = client
+            .delete(format!("http://{addr}/scim/v2/Groups/{id}"))
+            .header(key, "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn key_guardian_full_auto_lifecycle() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = scim_router(&state, Arc::clone(&guardian))
+            .route(Method::GET, "/api/db/status", db_status_handler(Arc::clone(&state), Arc::clone(&guardian)));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        client
+            .get(format!("http://{addr}/api/db/status"))
+            .header("x-api-key", "anything-goes")
+            .send()
+            .await
+            .expect("request should succeed");
+
+        let resp = client
+            .post(format!("http://{addr}/scim/v2/Users"))
+            .header("x-api-key", "bootstrap")
+            .json(&serde_json::json!({ "userName": "eve@example.com", "roles": ["developer"] }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let issued = body["urn:open-runo:params:scim:api-key"].as_str().unwrap().to_string();
+        let user_id = body["id"].as_str().unwrap().to_string();
+        assert!(issued.starts_with("orn_"));
+
+        let resp = client
+            .get(format!("http://{addr}/api/db/status"))
+            .header("x-api-key", "anything-goes")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let resp = client
+            .get(format!("http://{addr}/api/db/status"))
+            .header("x-api-key", &issued)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .delete(format!("http://{addr}/scim/v2/Users/{user_id}"))
+            .header("x-api-key", &issued)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+
+        let resp = client
+            .get(format!("http://{addr}/api/db/status"))
+            .header("x-api-key", &issued)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
     }
 }
