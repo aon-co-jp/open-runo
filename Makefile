@@ -5,7 +5,7 @@
 CARGO ?= cargo
 
 .PHONY: help build release test fmt fmt-check clippy audit deny doc \
-        run run-router clean quality-gate ci pre-commit
+        run run-router clean quality-gate ci pre-commit wasm-frontend
 
 help:
 	@echo "open-runo make targets:"
@@ -19,6 +19,7 @@ help:
 	@echo "  make deny           - cargo deny check (license + advisory + ban policy)"
 	@echo "  make doc            - cargo doc --workspace --no-deps"
 	@echo "  make run-router     - run the open-runo-router gateway locally"
+	@echo "  make wasm-frontend  - build apps/desktop-wasm and regenerate www/pkg (needs wasm32-unknown-unknown + wasm-bindgen-cli)"
 	@echo "  make quality-gate   - fmt-check + clippy + test + audit + deny (full CI gate)"
 	@echo "  make pre-commit     - fmt + clippy + test (fast local pre-commit loop)"
 	@echo "  make clean          - cargo clean"
@@ -52,6 +53,17 @@ doc:
 
 run-router:
 	$(CARGO) run -p open-runo-router
+
+# Rebuild the WASM frontend (apps/desktop-wasm) and regenerate its JS glue
+# into www/pkg. Requires: `rustup target add wasm32-unknown-unknown` and
+# `cargo install wasm-bindgen-cli --version 0.2.126` (must match the
+# wasm-bindgen version in apps/desktop-wasm/Cargo.lock — a mismatch fails
+# at load time in the browser, not at build time).
+wasm-frontend:
+	cd apps/desktop-wasm && $(CARGO) build --target wasm32-unknown-unknown
+	wasm-bindgen --target web --no-typescript --out-dir apps/desktop-wasm/www/pkg \
+		apps/desktop-wasm/target/wasm32-unknown-unknown/debug/open_runo_desktop_wasm.wasm
+	@echo "WASM frontend rebuilt: apps/desktop-wasm/www/pkg"
 
 clean:
 	$(CARGO) clean
