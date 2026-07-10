@@ -3,8 +3,9 @@
 //! out" composition — see `hyper_compat.rs` module doc), rather than
 //! reimplementing `poem::Middleware`/`Endpoint` traits.
 
-use crate::hyper_compat::{empty_status, Handler, Response};
+use crate::hyper_compat::{empty_status, json_response, Handler, Response};
 use hyper::StatusCode;
+use open_runo_api_types::RateLimitedResponse;
 use open_runo_security::RateLimiter;
 use std::env;
 use std::sync::Arc;
@@ -62,16 +63,33 @@ pub fn with_cors(inner: Handler) -> Handler {
     })
 }
 
-/// Wrap `inner` so every request/response pair is logged via `tracing`.
-/// Poem-free equivalent of `poem::middleware::Tracing`.
+/// Wrap `inner` so every request/response pair is logged via `tracing`,
+/// tagged with a request ID that also comes back as the `X-Request-Id`
+/// response header. If the caller already sent an `X-Request-Id` (e.g. a
+/// load balancer, or a client chaining its own trace), that value is
+/// reused instead of minting a new one, so a single request can be
+/// correlated end-to-end across hops. Otherwise a fresh UUID v4 is
+/// generated. Clients (the WASM frontend, `open-runo-cli`) surface this
+/// ID in error messages so a user can hand it to whoever reads the
+/// server's logs instead of describing "it just failed".
 pub fn with_tracing(inner: Handler) -> Handler {
     Arc::new(move |req, params| {
         let inner = Arc::clone(&inner);
         let method = req.method().clone();
         let path = req.uri().path().to_string();
+        let request_id = req
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         Box::pin(async move {
-            let resp = inner(req, params).await;
-            tracing::info!(%method, %path, status = %resp.status(), "request");
+            let mut resp = inner(req, params).await;
+            tracing::info!(%method, %path, status = %resp.status(), %request_id, "request");
+            if let Ok(value) = request_id.parse() {
+                resp.headers_mut().insert("x-request-id", value);
+            }
             resp
         })
     })
@@ -94,8 +112,20 @@ pub fn with_shared_rate_limit(inner: Handler, limiter: Arc<RateLimiter>) -> Hand
             .unwrap_or_else(|| "anonymous".to_string());
 
         Box::pin(async move {
-            if limiter.check(&key, chrono::Utc::now()).is_err() {
-                return empty_status(StatusCode::TOO_MANY_REQUESTS);
+            let now = chrono::Utc::now();
+            if limiter.check(&key, now).is_err() {
+                let retry_after_secs = limiter.seconds_until_reset(&key, now);
+                let mut resp = json_response(
+                    StatusCode::TOO_MANY_REQUESTS,
+                    &RateLimitedResponse {
+                        error: "rate limit exceeded, see retry_after_secs".to_string(),
+                        retry_after_secs,
+                    },
+                );
+                if let Ok(value) = retry_after_secs.to_string().parse() {
+                    resp.headers_mut().insert("retry-after", value);
+                }
+                return resp;
             }
             inner(req, params).await
         })
@@ -166,6 +196,64 @@ mod tests {
             client.get(format!("http://{addr}/x")).send().await.unwrap().status(),
             reqwest::StatusCode::TOO_MANY_REQUESTS
         );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_response_has_retry_after_header_and_typed_body() {
+        let router = Router::new().route(Method::GET, "/x", with_rate_limit(ok_handler(), 1, 60));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let _ = client.get(format!("http://{addr}/x")).send().await.unwrap();
+        let blocked = client.get(format!("http://{addr}/x")).send().await.unwrap();
+        assert_eq!(blocked.status(), reqwest::StatusCode::TOO_MANY_REQUESTS);
+        let retry_after_header: i64 = blocked
+            .headers()
+            .get("retry-after")
+            .expect("retry-after header should be present")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=60).contains(&retry_after_header));
+
+        let body: open_runo_api_types::RateLimitedResponse = blocked.json().await.unwrap();
+        assert_eq!(body.retry_after_secs, retry_after_header);
+    }
+
+    #[tokio::test]
+    async fn tracing_assigns_a_request_id_when_caller_sends_none() {
+        let router = Router::new().route(Method::GET, "/x", with_tracing(ok_handler()));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new().get(format!("http://{addr}/x")).send().await.unwrap();
+        let request_id = resp
+            .headers()
+            .get("x-request-id")
+            .expect("x-request-id header should be present")
+            .to_str()
+            .unwrap();
+        assert!(uuid::Uuid::parse_str(request_id).is_ok(), "should be a valid UUID: {request_id}");
+    }
+
+    #[tokio::test]
+    async fn tracing_echoes_a_caller_supplied_request_id() {
+        let router = Router::new().route(Method::GET, "/x", with_tracing(ok_handler()));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/x"))
+            .header("x-request-id", "caller-chosen-id-123")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.headers().get("x-request-id").unwrap().to_str().unwrap(), "caller-chosen-id-123");
     }
 
     #[tokio::test]

@@ -79,6 +79,23 @@ impl RateLimiter {
         entry.1 += 1;
         Ok(())
     }
+
+    /// Whole seconds until `key`'s current window resets, for a
+    /// `Retry-After` response header when [`Self::check`] rejects a
+    /// request. `0` if `key` has no active window (the next request would
+    /// start a fresh one and succeed immediately).
+    pub fn seconds_until_reset(&self, key: &str, now: DateTime<Utc>) -> i64 {
+        let windows = self
+            .windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match windows.get(key) {
+            Some((window_start, _)) => (self.window - now.signed_duration_since(*window_start))
+                .num_seconds()
+                .max(0),
+            None => 0,
+        }
+    }
 }
 
 
@@ -268,6 +285,21 @@ mod tests {
         assert!(limiter.check("client-b", t0).is_err());
         let t1 = t0 + Duration::seconds(2);
         assert!(limiter.check("client-b", t1).is_ok());
+    }
+
+    #[test]
+    fn seconds_until_reset_counts_down_within_the_window() {
+        let limiter = RateLimiter::new(1, Duration::seconds(10));
+        let t0 = Utc::now();
+        assert!(limiter.check("client-c", t0).is_ok());
+        assert_eq!(limiter.seconds_until_reset("client-c", t0), 10);
+        assert_eq!(limiter.seconds_until_reset("client-c", t0 + Duration::seconds(4)), 6);
+    }
+
+    #[test]
+    fn seconds_until_reset_is_zero_for_an_unseen_key() {
+        let limiter = RateLimiter::new(1, Duration::seconds(10));
+        assert_eq!(limiter.seconds_until_reset("never-seen", Utc::now()), 0);
     }
 
     #[test]

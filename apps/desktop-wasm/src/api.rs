@@ -6,7 +6,9 @@
 //! host process — the WASM bundle and the API it calls are served by the
 //! same `open-runo-router` binary, so this is a same-origin call.
 
-use open_runo_api_types::{FederationStatusResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion};
+use open_runo_api_types::{
+    FederationStatusResponse, RateLimitedResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
+};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use wasm_bindgen::{JsCast, JsValue};
@@ -169,7 +171,25 @@ async fn send(method: &str, path: &str, body: Option<&str>) -> Result<JsValue, S
     }
 
     if !resp.ok() {
-        return Err(format!("HTTP {}", resp.status()));
+        // The server tags every response with an X-Request-Id (see
+        // open_runo_router::middleware_hyper::with_tracing); surfacing it
+        // in the error lets a user hand a specific ID to whoever reads
+        // the server logs, instead of describing "it just failed".
+        let request_id = resp.headers().get("x-request-id").ok().flatten();
+        let suffix = request_id.map(|id| format!(" (request-id: {id})")).unwrap_or_default();
+
+        if resp.status() == 429 {
+            if let Ok(promise) = resp.json() {
+                if let Ok(json) = JsFuture::from(promise).await {
+                    if let Ok(body) = serde_wasm_bindgen::from_value::<RateLimitedResponse>(json) {
+                        return Err(format!("rate limited, retry in {}s{suffix}", body.retry_after_secs));
+                    }
+                }
+            }
+            return Err(format!("HTTP 429 (rate limited){suffix}"));
+        }
+
+        return Err(format!("HTTP {}{suffix}", resp.status()));
     }
 
     JsFuture::from(resp.json().map_err(|e| format!("{e:?}"))?)

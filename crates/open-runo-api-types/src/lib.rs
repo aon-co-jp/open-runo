@@ -63,6 +63,17 @@ pub struct FederationStatusResponse {
     pub field_count: usize,
 }
 
+/// Response body for any request rejected with `429 Too Many Requests` by
+/// `open-runo-router`'s rate-limiting middleware. `retry_after_secs` also
+/// appears as the standard `Retry-After` response header -- it's repeated
+/// in the body so clients that only look at JSON (rather than headers)
+/// still get it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitedResponse {
+    pub error: String,
+    pub retry_after_secs: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -95,5 +106,13 @@ mod tests {
         let json = r#"{"versions": []}"#;
         let resp: SchemaHistoryResponse = serde_json::from_str(json).unwrap();
         assert!(resp.versions.is_empty());
+    }
+
+    #[test]
+    fn rate_limited_response_roundtrips_through_json() {
+        let r = RateLimitedResponse { error: "rate limit exceeded".to_string(), retry_after_secs: 42 };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RateLimitedResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.retry_after_secs, 42);
     }
 }

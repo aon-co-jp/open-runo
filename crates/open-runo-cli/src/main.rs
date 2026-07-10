@@ -16,7 +16,9 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use open_runo_api_types::{FederationStatusResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion};
+use open_runo_api_types::{
+    FederationStatusResponse, RateLimitedResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -247,11 +249,7 @@ async fn self_issue_key(client: &reqwest::Client, base_url: &str) -> Result<Stri
         .send()
         .await
         .with_context(|| format!("connecting to {base_url}"))?;
-    let status = resp.status();
-    let body: Value = resp.json().await.context("decoding self-issue response as JSON")?;
-    if !status.is_success() {
-        bail!("self-issuing an API key failed ({status}): {body}");
-    }
+    let body: Value = check_status(resp).await?;
     body.get("api_key")
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -285,15 +283,40 @@ async fn post<Req: serde::Serialize, T: DeserializeOwned>(
     decode(resp).await
 }
 
-/// Decode a response as JSON, first checking the status so a non-2xx
-/// error body (which won't match `T`) produces a readable error instead
-/// of a confusing deserialize failure.
-async fn decode<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+/// Check a response's status and return its JSON body. Non-2xx errors
+/// include the server's `X-Request-Id` (see
+/// `open_runo_router::middleware_hyper::with_tracing`) so a user can hand
+/// a specific ID to whoever reads the server logs, and `429` responses
+/// get a friendly retry-after message instead of a raw JSON dump. Shared
+/// by [`decode`] and [`self_issue_key`], which both need this same
+/// error-shaping but decode the body differently on success.
+async fn check_status(resp: reqwest::Response) -> Result<Value> {
     let status = resp.status();
+    let request_id = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let body: Value = resp.json().await.context("decoding response as JSON")?;
+
     if !status.is_success() {
-        bail!("request failed ({status}): {body}");
+        let suffix = request_id.map(|id| format!(" (request-id: {id})")).unwrap_or_default();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            if let Ok(rate_limited) = serde_json::from_value::<RateLimitedResponse>(body.clone()) {
+                bail!("rate limited, retry in {}s{suffix}", rate_limited.retry_after_secs);
+            }
+        }
+        bail!("request failed ({status}){suffix}: {body}");
     }
+
+    Ok(body)
+}
+
+/// Decode a response as JSON via [`check_status`], then deserialize the
+/// body into `T` -- a confusing deserialize failure on an error body
+/// (which won't match `T`) is caught by `check_status` first.
+async fn decode<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
+    let body = check_status(resp).await?;
     serde_json::from_value(body).context("response JSON did not match the expected shape")
 }
 
