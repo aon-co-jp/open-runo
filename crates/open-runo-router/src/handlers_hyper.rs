@@ -746,6 +746,103 @@ pub fn route_request_handler(guardian: Arc<KeyGuardian>) -> Handler {
     })
 }
 
+fn persisted_query_store(state: &AppState) -> open_runo_persisted_queries::PersistedQueryStore {
+    open_runo_persisted_queries::PersistedQueryStore::new(
+        Arc::clone(&state.db),
+        open_runo_persisted_queries::EnforcementMode::Allow,
+    )
+}
+
+#[derive(Deserialize)]
+struct PqRegisterRequest {
+    query: String,
+}
+
+#[derive(Serialize)]
+struct PqRegisterResponse {
+    hash: String,
+    registered_at: String,
+}
+
+/// POST /api/persisted-queries — poem-free port of
+/// `handlers::persisted_queries::register_persisted_query`.
+pub fn register_persisted_query_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let body: PqRegisterRequest = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let record = match persisted_query_store(&state).register(&body.query).await {
+                Ok(r) => r,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+
+            crate::audit::record(&state, &actor, "persisted_query.register", record.hash.clone()).await;
+
+            json_response(
+                StatusCode::OK,
+                &PqRegisterResponse {
+                    hash: record.hash,
+                    registered_at: record.registered_at.to_rfc3339(),
+                },
+            )
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct PqQueryResponse {
+    hash: String,
+    query: String,
+    registered_at: String,
+}
+
+/// GET /api/persisted-queries/:hash — poem-free port of
+/// `handlers::persisted_queries::get_persisted_query`.
+pub fn get_persisted_query_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let hash = params.get("hash").unwrap_or("").to_string();
+            match persisted_query_store(&state).get(&hash).await {
+                Ok(Some(record)) => json_response(
+                    StatusCode::OK,
+                    &PqQueryResponse {
+                        hash: record.hash,
+                        query: record.document,
+                        registered_at: record.registered_at.to_rfc3339(),
+                    },
+                ),
+                Ok(None) => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("persisted query not found: {hash}") }),
+                ),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1304,6 +1401,81 @@ mod tests {
         let resp = reqwest::Client::new()
             .put(format!("http://{addr}/api/db/test_table/rec1"))
             .json(&serde_json::json!({ "value": 1 }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn persisted_query_register_and_fetch_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/persisted-queries",
+                register_persisted_query_handler(Arc::clone(&state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/persisted-queries/:hash",
+                get_persisted_query_handler(Arc::clone(&state), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/persisted-queries"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "query": "{ health }" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let hash = body["hash"].as_str().unwrap().to_string();
+        assert_eq!(hash.len(), 64);
+
+        let resp = client
+            .get(format!("http://{addr}/api/persisted-queries/{hash}"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["query"], "{ health }");
+
+        let resp = client
+            .get(format!(
+                "http://{addr}/api/persisted-queries/0000000000000000000000000000000000000000000000000000000000000000"
+            ))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn register_persisted_query_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/persisted-queries",
+            register_persisted_query_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/persisted-queries"))
+            .json(&serde_json::json!({ "query": "{ health }" }))
             .send()
             .await
             .expect("request should succeed");
