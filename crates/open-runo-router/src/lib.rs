@@ -80,6 +80,11 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
         .route(Method::GET, "/api/openapi.json", wrap(openapi::openapi_handler()))
         .route(
             Method::POST,
+            "/api/keys/self-issue",
+            wrap(handlers_hyper::self_issue_key_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::POST,
             "/api/schemas",
             wrap(handlers_hyper::register_schema_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )

@@ -210,6 +210,7 @@ curl -X POST -H "x-api-key: $KEY" http://new:8080/api/backup/restore-latest
 |------|------|
 | `/health` `/healthz` | 認証不要ヘルスチェック |
 | `/api/openapi.json` | REST APIのOpenAPI 3.0仕様(認証不要、Postman/Insomnia/Swagger UIへインポート可) |
+| `/api/keys/self-issue` | **認証不要**でAPIキーを自動発行(developer role、24時間有効)。人間がキーを意識しない設計の起点 |
 | `/graphql` (+`/graphql/ws`) | Federation GraphQL / Subscriptions(GraphiQLは`GET /graphql`) |
 | `/api/schemas*`（`?namespace=`） | Schema Registry（マルチグラフ対応） |
 | `/api/federation/*` | 合成・状態 |

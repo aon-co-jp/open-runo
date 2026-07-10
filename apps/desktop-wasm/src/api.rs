@@ -7,14 +7,74 @@
 //! same `open-runo-router` binary, so this is a same-origin call.
 
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{Request, RequestInit, RequestMode, Response};
 
-/// Dev-mode API key. `open-runo-router`'s KeyGuardian accepts any
-/// non-empty key while its registry is empty (see `auth_hyper.rs`); a
-/// real deployment would source this from a login flow instead.
-const DEV_API_KEY: &str = "open-runo-desktop-wasm";
+/// `localStorage` key the self-issued API key is cached under, so a page
+/// reload doesn't re-issue a fresh one every time.
+const STORAGE_KEY: &str = "open-runo-api-key";
+
+thread_local! {
+    /// In-memory cache for this page load. WASM is single-threaded so a
+    /// `RefCell` is enough — no need for a `Mutex`.
+    static CACHED_KEY: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+#[derive(Debug, Deserialize)]
+struct SelfIssueResponse {
+    api_key: String,
+}
+
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok()?
+}
+
+/// Get a working API key, obtaining one automatically if needed — the user
+/// of the app never sees, enters, or configures a key. Order: in-memory
+/// cache → `localStorage` (survives reloads) → `POST /api/keys/self-issue`
+/// (no auth required, see `handlers_hyper::self_issue_key_handler`).
+/// The obtained key is cached both in memory and in `localStorage`.
+async fn get_or_issue_api_key() -> Result<String, String> {
+    if let Some(key) = CACHED_KEY.with(|c| c.borrow().clone()) {
+        return Ok(key);
+    }
+    if let Some(storage) = local_storage() {
+        if let Ok(Some(key)) = storage.get_item(STORAGE_KEY) {
+            if !key.is_empty() {
+                CACHED_KEY.with(|c| *c.borrow_mut() = Some(key.clone()));
+                return Ok(key);
+            }
+        }
+    }
+
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::SameOrigin);
+    let request =
+        Request::new_with_str_and_init(&format!("{}/api/keys/self-issue", base_url()), &opts)
+            .map_err(|e| format!("{e:?}"))?;
+    let window = web_sys::window().ok_or("no window")?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| format!("self-issue fetch error: {e:?}"))?;
+    let resp: Response = resp_value.dyn_into().map_err(|e| format!("{e:?}"))?;
+    if !resp.ok() {
+        return Err(format!("self-issue failed: HTTP {}", resp.status()));
+    }
+    let json = JsFuture::from(resp.json().map_err(|e| format!("{e:?}"))?)
+        .await
+        .map_err(|e| format!("self-issue body read error: {e:?}"))?;
+    let parsed: SelfIssueResponse =
+        serde_wasm_bindgen::from_value(json).map_err(|e| format!("self-issue decode error: {e}"))?;
+
+    CACHED_KEY.with(|c| *c.borrow_mut() = Some(parsed.api_key.clone()));
+    if let Some(storage) = local_storage() {
+        let _ = storage.set_item(STORAGE_KEY, &parsed.api_key);
+    }
+    Ok(parsed.api_key)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Health {
@@ -88,7 +148,7 @@ fn base_url() -> &'static str {
     ""
 }
 
-async fn send(method: &str, path: &str, body: Option<&str>) -> Result<JsValue, String> {
+async fn do_fetch(method: &str, path: &str, body: Option<&str>, api_key: &str) -> Result<Response, String> {
     let opts = RequestInit::new();
     opts.set_method(method);
     opts.set_mode(RequestMode::SameOrigin);
@@ -100,7 +160,7 @@ async fn send(method: &str, path: &str, body: Option<&str>) -> Result<JsValue, S
     let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("{e:?}"))?;
     request
         .headers()
-        .set("x-api-key", DEV_API_KEY)
+        .set("x-api-key", api_key)
         .map_err(|e| format!("{e:?}"))?;
     if body.is_some() {
         request
@@ -113,7 +173,30 @@ async fn send(method: &str, path: &str, body: Option<&str>) -> Result<JsValue, S
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
         .map_err(|e| format!("fetch error: {e:?}"))?;
-    let resp: Response = resp_value.dyn_into().map_err(|e| format!("{e:?}"))?;
+    resp_value.dyn_into().map_err(|e| format!("{e:?}"))
+}
+
+/// Drop the cached key (memory + `localStorage`) so the next call
+/// transparently self-issues a fresh one.
+fn clear_cached_api_key() {
+    CACHED_KEY.with(|c| *c.borrow_mut() = None);
+    if let Some(storage) = local_storage() {
+        let _ = storage.remove_item(STORAGE_KEY);
+    }
+}
+
+async fn send(method: &str, path: &str, body: Option<&str>) -> Result<JsValue, String> {
+    let api_key = get_or_issue_api_key().await?;
+    let mut resp = do_fetch(method, path, body, &api_key).await?;
+
+    // The cached key may have expired or been revoked server-side (24h TTL,
+    // see self_issue_key_handler). Transparently self-issue a new one and
+    // retry once, rather than surfacing a confusing 401 to the UI.
+    if resp.status() == 401 {
+        clear_cached_api_key();
+        let fresh_key = get_or_issue_api_key().await?;
+        resp = do_fetch(method, path, body, &fresh_key).await?;
+    }
 
     if !resp.ok() {
         return Err(format!("HTTP {}", resp.status()));

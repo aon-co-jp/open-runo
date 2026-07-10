@@ -1675,6 +1675,51 @@ pub fn stream_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -
     })
 }
 
+#[derive(Serialize)]
+struct SelfIssueResponse {
+    api_key: String,
+    expires_at: String,
+}
+
+/// POST /api/keys/self-issue — lets a caller (typically the WASM frontend
+/// on first load) obtain a working API key **without a human ever typing
+/// or configuring one**. No auth required to reach this endpoint (like
+/// `/health`) — the key it hands back is itself the credential, scoped to
+/// the `developer` role and expiring after
+/// [`SELF_ISSUE_KEY_TTL_HOURS`], so an unattended caller can't accumulate
+/// standing access. Every issuance is audited. This completes
+/// KeyGuardian's "no human key management" promise for browser clients,
+/// which previously had to embed a fixed placeholder string that would
+/// have been rejected the moment the registry went non-empty in production.
+pub fn self_issue_key_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |_req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            let owner = format!("wasm-frontend-{}", uuid::Uuid::new_v4());
+            let expires_at = chrono::Utc::now() + chrono::Duration::hours(SELF_ISSUE_KEY_TTL_HOURS);
+            match guardian
+                .issue(&owner, vec!["developer".to_string()], Some(expires_at))
+                .await
+            {
+                Ok(api_key) => {
+                    crate::audit::record(&state, "key-guardian", "key.self_issue", owner).await;
+                    json_response(
+                        StatusCode::OK,
+                        &SelfIssueResponse { api_key, expires_at: expires_at.to_rfc3339() },
+                    )
+                }
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+const SELF_ISSUE_KEY_TTL_HOURS: i64 = 24;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2701,5 +2746,47 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn self_issue_key_requires_no_auth_and_the_key_it_returns_works() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/keys/self-issue",
+                self_issue_key_handler(Arc::clone(&state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/db/status",
+                db_status_handler(Arc::clone(&state), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        // No X-Api-Key header at all -- self-issue must still succeed.
+        let resp = client
+            .post(format!("http://{addr}/api/keys/self-issue"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let key = body["api_key"].as_str().unwrap().to_string();
+        assert!(key.starts_with("orn_"));
+        assert!(!body["expires_at"].as_str().unwrap().is_empty());
+
+        // The freshly self-issued key must now authenticate real requests.
+        let resp = client
+            .get(format!("http://{addr}/api/db/status"))
+            .header("x-api-key", &key)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 }
