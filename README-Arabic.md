@@ -1,6 +1,7 @@
 # open-runo
 
-**منصة GraphQL Federation / إطار عمل ويب مبني بلغة Rust وإطار Poem**
+**منصة GraphQL Federation مبنية بلغة Rust خالصة** (Poem وTauri وCosmo ليست أبدًا
+اعتماديات مباشرة — تم إعادة تنفيذ وظائفها يدويًا للحفاظ على التوافق فوق tokio+hyper)
 — ميزات الخطة المدفوعة من WunderGraph Cosmo، متاحة الآن كمصدر مفتوح.
 مزوّدة بذكاء اصطناعي ذاتي التعلّم (بدون الحاجة لعقود مع نماذج لغوية خارجية).
 
@@ -35,18 +36,20 @@ WunderGraph Cosmo (المكتوب بلغة Go) فقط في خططه المدفو
 - 📦 نقل واستعادة سهلان — كل البيانات وحالة الذكاء الاصطناعي في ملف JSON واحد قابل للنقل
 - 🔀 تحويل المحركات والتكامل الموزّع — تحويل MySQL→PostgreSQL→CockroachDB بأمر واحد
 - ⚡ VersionlessAPI — تجنب إنشاء `/v1 /v2` عبر محرك قواعد توافق
-- 🖥️ تطبيق سطح مكتب Tauri 2 (TypeScript + Bootstrap 5)
+- 🖥️ تطبيق سطح مكتب مُصرَّف من Rust إلى WebAssembly (بدون Tauri أو Node.js أو TypeScript)
+- ⌨️ واجهة سطر أوامر (`open-runo-cli`)، مكافئة لـ `wgc`، لتسجيل/جلب المخططات
+  وحالة الـ federation ومواصفة OpenAPI
 
 ## البدء السريع
 
 ```bash
 git clone https://github.com/aon-co-jp/open-runo
 cd open-runo
-cargo test --workspace          # 192 اختبارًا
+cargo test --workspace          # 210 اختبارًا
 cargo run -p open-runo-gateway  # تشغيل خادم REST + GraphQL
 ```
 
-## بنية Workspace (15 حزمة)
+## بنية Workspace (17 حزمة)
 
 يتكون من `open-runo-router` (بوابة REST/مصادقة/تدقيق)،
 `open-runo-gateway` (نقطة نهاية GraphQL)، `open-runo-federation` (تركيب المخططات)،

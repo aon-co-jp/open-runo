@@ -1,6 +1,7 @@
 # open-runo
 
-**Rust + Poem 기반 GraphQL Federation 플랫폼 / 웹 프레임워크**
+**순수 Rust로 만든 GraphQL Federation 플랫폼**(Poem/Tauri/Cosmo는 직접
+의존성이 아니며, tokio+hyper 위에서 호환성을 유지하도록 기능을 직접 재구현함)
 — WunderGraph Cosmo 유료 플랜 기능을 OSS로 제공. 자체 학습 AI 내장(외부 LLM 계약 불필요).
 
 📖 다른 언어: [日本語](README-Japan.md) / [English](README-English.md) ·
@@ -33,18 +34,20 @@
 - 📦 간편 이전/복구 — 전체 데이터 + AI 학습 상태를 단일 이식 가능 JSON으로
 - 🔀 엔진 변환·분산 통합 — MySQL→PostgreSQL→CockroachDB 원클릭 변환
 - ⚡ VersionlessAPI — `/v1 /v2` 없이 호환성 규칙 엔진으로 대응
-- 🖥️ Tauri 2 데스크톱 관리 앱(TypeScript + Bootstrap 5)
+- 🖥️ 데스크톱 관리 앱(Rust를 WebAssembly로 컴파일, Tauri/Node.js/TypeScript 미사용)
+- ⌨️ CLI(`open-runo-cli`) — `wgc`에 상당하는 CLI로 스키마 등록/조회,
+  federation 상태 확인, OpenAPI 스펙 조회 가능
 
 ## 빠른 시작
 
 ```bash
 git clone https://github.com/aon-co-jp/open-runo
 cd open-runo
-cargo test --workspace          # 테스트 192개
+cargo test --workspace          # 테스트 210개
 cargo run -p open-runo-gateway  # REST + GraphQL 서버 실행
 ```
 
-## 워크스페이스 구성(15개 crate)
+## 워크스페이스 구성(17개 crate)
 
 `open-runo-router`(REST 게이트웨이/인증/감사), `open-runo-gateway`(GraphQL 엔드포인트),
 `open-runo-federation`(스키마 합성), `open-runo-db`(멀티 엔진 DB 추상화) 등으로 구성됩니다.

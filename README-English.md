@@ -1,11 +1,12 @@
-# poem-cosmo-tauri
+# open-runo
 
 **GraphQL Federation platform built with Rust** (Poem/Tauri/Cosmo are never
 direct dependencies — their functionality is hand-implemented for
 compatibility on tokio+hyper) — WunderGraph Cosmo's paid-plan features,
 delivered as OSS. Ships with its own self-learning AI (no external LLM
-contract required). Successor to / consolidation target for the former
-open-runo and poem-runo repositories.
+contract required). Developed in parallel with its sibling repo
+[poem-cosmo-tauri](https://github.com/aon-co-jp/poem-cosmo-tauri) (where
+implementation work lands first, then gets mirrored here once verified).
 
 📖 Other languages: [日本語](README-Japan.md) / [中文](README-Chinese.md) /
 [한국어](README-Korea.md) / [Español](README-Spain.md) / [Français](README-France.md) /
@@ -52,17 +53,21 @@ are implemented here in pure Rust — **entirely free, as OSS**.
 - 🔀 **Engine conversion & distributed integration** — convert
   MySQL→PostgreSQL→CockroachDB with a single function call (with automatic
   verification), export SQL/CSV for Snowflake, unify internal distributed DBs
-  via FederatedBackend
+  via FederatedBackend (which can also be declared entirely from a single
+  TOML file — members, table routing, broadcast tables, default member)
 - ⚡ **VersionlessAPI** — a compatibility rule engine that avoids ever creating `/v1 /v2`
 - 🖥️ **Desktop management app** compiled from Rust to WebAssembly (no Tauri,
   no Node.js, no TypeScript build chain)
+- ⌨️ **CLI (`open-runo-cli`)** — a `wgc`-equivalent CLI for schema
+  register/get/history, federation status, and OpenAPI spec retrieval;
+  auto self-issues an API key if `--api-key` is omitted
 
 ## Quick start
 
 ```bash
-git clone https://github.com/aon-co-jp/poem-cosmo-tauri
-cd poem-cosmo-tauri
-cargo test --workspace          # 192 tests
+git clone https://github.com/aon-co-jp/open-runo
+cd open-runo
+cargo test --workspace          # 210 tests
 cargo run -p open-runo-gateway  # start the combined REST + GraphQL server (poem-free)
 ```
 
@@ -97,17 +102,20 @@ and Cache & Backup — Rust compiled to WebAssembly, no Tauri/Node.js/TypeScript
 See **[PORTING.md](PORTING.md)** for enabling the AI HTML cache in your own app,
 plus the full list of environment variables and endpoints.
 
-## Workspace structure (15 crates)
+## Workspace structure (17 crates)
 
 Composed of `open-runo-router` (REST gateway / auth / audit / AI HTML cache /
 self-maintenance), `open-runo-gateway` (GraphQL endpoint: Federation /
 Subscriptions / Persisted Queries / response cache), `open-runo-federation`
 (schema composition / breaking-change detection), `open-runo-db` (`DbBackend`
-abstraction over 9 engines, DUAL / Federated / migrate), `open-runo-security`
-(API keys / JWT / OIDC / RBAC / rate limiting), `open-runo-scim` (SCIM 2.0),
-`open-runo-cache`, `open-runo-persisted-queries`, `open-runo-ai-routing`,
-`open-runo-versionless-api`, and `open-runo-history` / `-backup` /
-`-observability`. See [docs/architecture.md](docs/architecture.md) for details.
+abstraction over 9 engines, DUAL / Federated — including TOML-file config —
+/ migrate), `open-runo-security` (API keys / JWT / OIDC / RBAC / rate
+limiting), `open-runo-scim` (SCIM 2.0), `open-runo-cache`,
+`open-runo-persisted-queries`, `open-runo-ai-routing`,
+`open-runo-versionless-api`, `open-runo-cli` (a `wgc`-equivalent CLI),
+`open-runo-api-types` (shared REST/CLI types), and `open-runo-history` /
+`-backup` / `-observability` (the latter with OTLP trace export). See
+[docs/architecture.md](docs/architecture.md) for details.
 
 ## Deployment
 
@@ -115,6 +123,17 @@ The same binary runs unmodified on a self-hosted server, a VPS, AWS, or Docker.
 Scale from a minimal single-SQLite setup up to `--features full` (DUAL + Redis +
 ClickHouse) via feature flags. There is no functionality gated behind a
 "managed-only" tier.
+
+## Documentation
+
+[docs/architecture.md](docs/architecture.md) — overall design ·
+[docs/cosmo-parity.md](docs/cosmo-parity.md) — Cosmo feature-parity matrix ·
+[docs/poem-parity.md](docs/poem-parity.md) — Poem feature-parity matrix ·
+[docs/tauri-parity.md](docs/tauri-parity.md) — Tauri feature-parity matrix ·
+[docs/migration.md](docs/migration.md) — move / convert / consolidate ·
+[docs/api-spec.md](docs/api-spec.md) — API spec ·
+[docs/security.md](docs/security.md) — security ·
+[docs/HANDOFF.md](docs/HANDOFF.md) — development history
 
 ## License
 

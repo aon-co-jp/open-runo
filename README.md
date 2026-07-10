@@ -1,19 +1,19 @@
-# poem-cosmo-tauri
+# open-runo
 
 **Rust 製 GraphQL Federation プラットフォーム(Poem/Tauri/Cosmoは非依存・互換自前実装)**
-— WunderGraph Cosmo の有料版機能を OSS・Pure Rust で(Cosmo自体は着想元のみで実装非依存)。独自の自己学習 AI 搭載（外部 LLM 契約不要）。
+— WunderGraph Cosmo の有料版機能を OSS・Pure Rust で(Cosmo自体は着想元のみで実装非依存)。独自の自己学習 AI 搭載(外部 LLM 契約不要)。
 
-> poem-cosmo-tauri は [open-runo](https://github.com/aon-co-jp/open-runo) を正本として
-> 分岐した poem-runo をさらにリネーム・統合した後継リポジトリです。名称は歴史的
-> 経緯によるもので、現在の実体は Poem・Tauri・WunderGraph Cosmo のいずれにも
-> パッケージとして直接依存せず、それぞれの機能・API 形状には互換性を保ちつつ
-> Rust 標準ライブラリ + tokio/hyper + WebAssembly で自前実装しています。
-> open-runo と本リポジトリを同時並行で開発しています。
+> [poem-cosmo-tauri](https://github.com/aon-co-jp/poem-cosmo-tauri)(姉妹リポジトリ・
+> 実装の先行地点)と同時並行で開発しています。実装作業は poem-cosmo-tauri 側で
+> 先行し、動作確認が取れたファイルをこちらへミラーする運用です。両リポジトリとも
+> Poem・Tauri・WunderGraph Cosmo のいずれにもパッケージとして直接依存せず、
+> それぞれの機能・API 形状には互換性を保ちつつ Rust 標準ライブラリ + tokio/hyper +
+> WebAssembly で自前実装しています。
 
-[![CI](https://github.com/aon-co-jp/poem-cosmo-tauri/actions/workflows/ci.yml/badge.svg)](https://github.com/aon-co-jp/poem-cosmo-tauri/actions/workflows/ci.yml)
+[![CI](https://github.com/aon-co-jp/open-runo/actions/workflows/ci.yml/badge.svg)](https://github.com/aon-co-jp/open-runo/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)
-![Tests](https://img.shields.io/badge/tests-192%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-210%20passed-brightgreen)
 
 📖 詳細: [日本語 README](README-Japan.md) / [English README](README-English.md) /
 [中文](README-Chinese.md) / [한국어](README-Korea.md) / [Español](README-Spain.md) /
@@ -23,7 +23,7 @@
 
 ---
 
-## poem-cosmo-tauri とは
+## open-runo とは
 
 REST API の乱立(BFF 地獄・`/v1 /v2` のバージョン爆発・エンドポイント管理の崩壊)を
 **GraphQL Federation + VersionlessAPI** で根本解決するプラットフォームです。
@@ -39,14 +39,14 @@ tokio/hyper で自前実装しています。
        └───────GraphQL (POST /graphql) + REST───────────┘
                            │
                  ┌───────────────────┐        PostgreSQL :5432
-                 │  poem-cosmo-tauri │──DUAL──┤
+                 │     open-runo     │──DUAL──┤
                  │  (このリポジトリ)  │        aruaru-db  :5433
                  └───────────────────┘        Redis / ClickHouse
 ```
 
 ## 機能マトリクス
 
-| 機能 | Cosmo 無料版 | Cosmo 有料版 | **poem-cosmo-tauri** |
+| 機能 | Cosmo 無料版 | Cosmo 有料版 | **open-runo** |
 |------|:---:|:---:|:---:|
 | GraphQL Federation / Schema Registry | ✅ | ✅ | ✅ |
 | GraphQL Subscriptions (WebSocket) | ✅ | ✅ | ✅ |
@@ -60,7 +60,7 @@ tokio/hyper で自前実装しています。
 | マルチグラフ / namespace | — | ✅ | ✅ **無料** |
 | リクエスト数・チーム人数・保持期間の制限 | あり | 緩和 | **一切なし** |
 
-### poem-cosmo-tauri だけの機能
+### open-runo だけの機能
 
 - 🧠 **自己学習 AI**（外部 LLM・有料契約ゼロ）— HTML ページキャッシュの
   自動判定（URL パターン汎化によるコールドスタート予測）、レンダリング
@@ -74,16 +74,21 @@ tokio/hyper で自前実装しています。
   `restore-latest` ワンコール復元
 - 🔀 **エンジン変換・分散統合** — MySQL→PostgreSQL→CockroachDB を 1 関数で
   変換（自動照合つき）、Snowflake 向け SQL/CSV エクスポート、
-  FederatedBackend で社内分散 DB を 1 つに統合運用
+  FederatedBackend で社内分散 DB を 1 つに統合運用(TOML 1 枚で
+  members/routes/broadcast を宣言する設定ファイル読み込みにも対応)
 - ⚡ **VersionlessAPI** — `/v1 /v2` を作らない互換性ルールエンジン
-- 🖥️ **デスクトップ管理アプリ**(Tauri非依存・互換UI、TypeScript + Bootstrap 5)
+- 🖥️ **デスクトップ管理アプリ**(Tauri非依存・互換UI、Rust→WebAssembly、
+  Node.js/TypeScript ビルドチェーン不使用)
+- ⌨️ **CLI(`open-runo-cli`)** — wgc 相当のスキーマ登録/取得/履歴確認・
+  federation status・OpenAPI スペック取得を CLI から実行、APIキーは
+  未指定なら自動 self-issue
 
 ## クイックスタート
 
 ```bash
-git clone https://github.com/aon-co-jp/poem-cosmo-tauri
-cd poem-cosmo-tauri
-cargo test --workspace          # 192 テスト
+git clone https://github.com/aon-co-jp/open-runo
+cd open-runo
+cargo test --workspace          # 210 テスト
 cargo run -p open-runo-gateway  # REST + GraphQL 統合サーバー起動(poem-free)
 ```
 
@@ -120,7 +125,7 @@ Cache & Backup の8ページ管理UIが使えます(Tauri・Node.js・TypeScript
 AI HTML キャッシュを有効化して自分のアプリに載せる例・全環境変数・
 全エンドポイントは **[PORTING.md](PORTING.md)** を参照してください。
 
-## ワークスペース構成（15 クレート）
+## ワークスペース構成（17 クレート）
 
 | クレート | 役割 |
 |----------|------|
@@ -129,14 +134,16 @@ AI HTML キャッシュを有効化して自分のアプリに載せる例・全
 | `open-runo-gateway` | GraphQL エンドポイント（Federation / Subscriptions / PQ / レスポンスキャッシュ） |
 | `open-runo-federation` | スキーマ合成・破壊的変更検出 |
 | `open-runo-schema-registry` | バージョン管理・namespace（マルチグラフ） |
-| `open-runo-db` | DbBackend 抽象（9 エンジン）・DUAL・Federated・migrate |
+| `open-runo-db` | DbBackend 抽象（9 エンジン）・DUAL・Federated（TOML設定対応）・migrate |
 | `open-runo-cache` | TTL キャッシュ + 自己学習予測器（Redis backend は feature） |
 | `open-runo-security` | API キー・JWT・OIDC・RBAC・レートリミット |
 | `open-runo-persisted-queries` | Trusted Documents（SHA-256 / APQ 互換） |
 | `open-runo-scim` | SCIM 2.0 Users / Groups |
 | `open-runo-ai-routing` | AI プロバイダ選択（コスト/レイテンシ/ローカル/プライバシー） |
 | `open-runo-versionless-api` | 互換性ルールエンジン |
-| `open-runo-history` / `-backup` / `-observability` | 変更履歴 / バックアップ / 監視 |
+| `open-runo-cli` | wgc 相当の CLI（schema register/get/history・federation status・openapi・login） |
+| `open-runo-api-types` | REST/CLI 共有の型定義 |
+| `open-runo-history` / `-backup` / `-observability` | 変更履歴 / バックアップ / 監視(OTLP export 対応) |
 
 ## デプロイ
 

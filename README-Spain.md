@@ -1,6 +1,8 @@
 # open-runo
 
-**Plataforma de GraphQL Federation / framework web construido con Rust + Poem**
+**Plataforma de GraphQL Federation construida en Rust puro** (Poem/Tauri/Cosmo
+nunca son dependencias directas — su funcionalidad está reimplementada a mano
+para mantener compatibilidad sobre tokio+hyper)
 — Funciones del plan de pago de WunderGraph Cosmo, ahora como OSS.
 Incluye IA de autoaprendizaje propia (sin contratos con LLM externos).
 
@@ -35,18 +37,20 @@ Las funciones que WunderGraph Cosmo (Go) solo ofrece en planes de pago
 - 📦 Migración y restauración sencillas — todos los datos + estado de IA en un JSON portátil
 - 🔀 Conversión de motores e integración distribuida — MySQL→PostgreSQL→CockroachDB con un comando
 - ⚡ VersionlessAPI — evita crear `/v1 /v2` mediante un motor de reglas de compatibilidad
-- 🖥️ App de escritorio Tauri 2 (TypeScript + Bootstrap 5)
+- 🖥️ App de escritorio compilada de Rust a WebAssembly (sin Tauri, sin Node.js, sin TypeScript)
+- ⌨️ CLI (`open-runo-cli`), equivalente a `wgc`, para registrar/consultar esquemas,
+  ver el estado de la federación y obtener la spec OpenAPI
 
 ## Inicio rápido
 
 ```bash
 git clone https://github.com/aon-co-jp/open-runo
 cd open-runo
-cargo test --workspace          # 192 tests
+cargo test --workspace          # 210 tests
 cargo run -p open-runo-gateway  # servidor REST + GraphQL
 ```
 
-## Estructura del workspace (15 crates)
+## Estructura del workspace (17 crates)
 
 Compuesto por `open-runo-router` (gateway REST/auth/auditoría),
 `open-runo-gateway` (endpoint GraphQL), `open-runo-federation` (composición de esquemas),

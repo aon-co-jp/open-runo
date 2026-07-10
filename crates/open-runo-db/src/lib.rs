@@ -36,6 +36,7 @@
 
 pub mod dual;
 pub mod federated;
+pub mod federated_config;
 pub mod migrate;
 pub mod migration;
 
@@ -568,8 +569,18 @@ pub mod clickhouse_backend {
     use clickhouse::Client;
     use serde::{Deserialize, Serialize};
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     pub struct ClickHouseBackend { client: Client }
+
+    // `clickhouse::Client` doesn't implement `Debug`, so it can't be
+    // `#[derive(Debug)]`d directly; a manual impl that just names the type
+    // satisfies the workspace's `missing_debug_implementations` lint
+    // without pretending to expose the client's internals.
+    impl std::fmt::Debug for ClickHouseBackend {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("ClickHouseBackend").finish_non_exhaustive()
+        }
+    }
 
     #[derive(clickhouse::Row, Serialize, Deserialize, Debug)]
     struct KvRow { key: String, value: String }
