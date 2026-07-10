@@ -1,4 +1,15 @@
-# 技術スタック・開発ルール(open-runo)
+# 【廃止】このリポジトリは poem-cosmo-tauri に統合されました(2026-07-10)
+
+ユーザー指示により、今後の開発は https://github.com/aon-co-jp/poem-cosmo-tauri
+に一本化されました。**このリポジトリへは今後コミットしません。**
+最終方針: Tauri・Poem・WunderGraph Cosmo(有料版含む)を外部パッケージ/
+ライブラリとして直接依存させることはせず、各ツールが提供する機能・API形状・
+体験には互換性を保ちながらRust標準ライブラリ + tokio/hyperで自前実装する。
+詳細・以降の開発ルールは poem-cosmo-tauri 側の `CLAUDE.md` を参照してください。
+
+---
+
+# 技術スタック・開発ルール(open-runo、旧内容・参考用)
 
 このリポジトリ、および関連プロジェクト(`open-web-server`/`aruaru-db`/
 `aruaru-web`/`open-raid-z`)で開発・保守を行う際は、以下を基本方針とする。
@@ -8,27 +19,33 @@
 
 ## フロントエンド
 
-- **Tauri**(メインフレームワーク): https://v2.tauri.app/ | https://github.com/tauri-apps/tauri
-- HTML5 / CSS3
-- **TypeScript**: 必要最低限・最小限の範囲に留める(ロジックはRust側に置き、
-  TypeScript側はDOM操作・`invoke()`呼び出し等の薄い配線のみとする方針)
-- **Bootstrap**
+- Tauriパッケージには依存しない。ただしTauriが提供するデスクトップUI体験
+  (`invoke()`的なコマンド呼び出し等)とは互換性のあるインターフェースを
+  HTML5/CSS3 + 必要最低限のTypeScriptで自前実装し、将来的にTauriへ
+  戻す・乗せ替えることが容易な設計を保つ。
 
 ## バックエンド・コア
 
-- **Rust**(メイン言語): https://www.rust-lang.org/ja/ | https://github.com/rust-lang/rust
-- **Poem**(Webフレームワーク): https://docs.rs/poem/latest/poem/ | https://github.com/poem-web/poem
+- **Rust**(メイン言語、標準ライブラリ中心): https://www.rust-lang.org/ja/ | https://github.com/rust-lang/rust
+- **tokio** + **hyper**(Webフレームワークなしで直接HTTPサーバを自前実装):
+  https://tokio.rs/ | https://docs.rs/hyper/latest/hyper/
+- Poemパッケージには依存しないが、Poemのルーティング/ハンドラAPI形状とは
+  互換性のあるインターフェースを維持しながらtokio/hyper直接実装へ移行する
+  (既存ハンドラのシグネチャ・レスポンス形式を極力変えない。移行状況は
+  下記HANDOFF参照)。
 
 ## API設計思想(参考・概念のみ)
 
 - **VersionLess API**という考え方を参考にする(WunderGraphのブログ/podcast参照)。
 - **WunderGraph Cosmo**: あくまで**参考・着想元としてのみ**参照する。
-  **実装には絶対に使用しない**。https://github.com/wundergraph/cosmo
+  **有料版を含め実装には絶対に使用しない**。https://github.com/wundergraph/cosmo
 
 ## 関連プロジェクト
 
-- **open-runo**(このリポジトリ。GraphQL Federation / API Gateway /
-  AI-native routing platform): https://github.com/aon-co-jp/open-runo
+- **poem-cosmo-tauri**(正本・一本化先。GraphQL Federation / API Gateway /
+  AI-native routing platform): https://github.com/aon-co-jp/poem-cosmo-tauri
+- **open-runo**(このリポジトリ。2026-07-10付けで廃止・poem-cosmo-tauriへ
+  統合。今後更新しない): https://github.com/aon-co-jp/open-runo
 - **open-web-server**: https://github.com/aon-co-jp/open-web-server
 - **aruaru-db**: https://github.com/aon-co-jp/aruaru-db
 - **aruaru-web**: https://github.com/aon-co-jp/aruaru-web
