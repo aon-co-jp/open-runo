@@ -281,6 +281,25 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
                 "application/wasm",
             )),
         )
+        // PWA manifest + icon, so the app can be "installed" from the
+        // browser (standalone window, home-screen icon) — the closest
+        // no-Tauri equivalent to Tauri's native app-bundle experience.
+        .route(
+            Method::GET,
+            "/manifest.json",
+            wrap(hyper_compat::static_file_handler(
+                static_dir().join("manifest.json"),
+                "application/manifest+json",
+            )),
+        )
+        .route(
+            Method::GET,
+            "/icon.svg",
+            wrap(hyper_compat::static_file_handler(
+                static_dir().join("icon.svg"),
+                "image/svg+xml",
+            )),
+        )
 }
 
 /// Resolve the WASM frontend's static asset directory. Defaults to

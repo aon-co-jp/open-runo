@@ -1,0 +1,25 @@
+{
+  "name": "open-runo Desktop",
+  "short_name": "open-runo",
+  "description": "open-runo GraphQL Federation platform admin UI — Rust compiled to WebAssembly, no Tauri/Node.js/TypeScript.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#14161a",
+  "theme_color": "#14161a",
+  "lang": "ja",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
