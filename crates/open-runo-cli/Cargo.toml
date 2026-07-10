@@ -1,0 +1,24 @@
+[package]
+name = "open-runo-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "open-runo command-line client: schema registry search/register, federation status, OpenAPI spec dump -- a wgc-equivalent developer experience over open-runo-router's REST API (see docs/cosmo-parity.md 4a)"
+
+[[bin]]
+name = "open-runo-cli"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }

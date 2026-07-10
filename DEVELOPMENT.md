@@ -57,6 +57,23 @@ backed by `open_runo_security::RateLimiter`, keyed by the `X-Forwarded-For` /
 `X-Real-IP` header (falling back to a single shared bucket when neither is
 present).
 
+### Command-line client (`open-runo-cli`)
+
+A `wgc`-equivalent CLI (see `docs/cosmo-parity.md` 4a) talks to a running
+`open-runo-router`/`open-runo-gateway` over its REST API -- no manual API
+key setup required, it self-issues one on first use the same way the WASM
+frontend does:
+
+```bash
+cargo run -p open-runo-cli -- schema register --service users --sdl-file schema.graphql
+cargo run -p open-runo-cli -- schema history --service users
+cargo run -p open-runo-cli -- federation status
+cargo run -p open-runo-cli -- openapi --json
+```
+
+`--base-url` (default `http://localhost:8080`) and `--api-key` can also be
+set via `OPEN_RUNO_CLI_BASE_URL` / `OPEN_RUNO_CLI_API_KEY`.
+
 Prefer Docker Compose for a one-command local stack (gateway + Postgres):
 
 ```bash

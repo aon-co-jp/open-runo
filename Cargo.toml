@@ -15,6 +15,7 @@ members = [
     "crates/open-runo-persisted-queries",
     "crates/open-runo-scim",
     "crates/open-runo-cache",
+    "crates/open-runo-cli",
 ]
 
 resolver = "2"
@@ -54,6 +55,8 @@ async-graphql = "7.0"
 async-graphql-poem = "7.0"
 sha2 = "0.10"
 hex = "0.4"
+clap = { version = "4.5", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # open-runo crates (path deps, shared across workspace members)
 open-runo-core = { path = "crates/open-runo-core" }
