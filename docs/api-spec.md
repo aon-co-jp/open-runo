@@ -341,6 +341,8 @@ migrated. There is no `/v1`-style prefix and none is planned — see
 
 ## Error format
 
-All error responses use Poem's default plain-text body with an appropriate
-HTTP status code. A structured JSON error envelope will be added once the
-error middleware is wired in (planned for Phase 2).
+Most error responses (400/404/409/422/500) return a JSON body
+`{"error": "<message>"}` alongside the HTTP status code. Authentication
+failures (401, missing/invalid `X-Api-Key`) return an empty body with just
+the status code — check the status first, don't assume a JSON body is
+always present.
