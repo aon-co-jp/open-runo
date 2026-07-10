@@ -23,6 +23,7 @@
 //! [`auth_hyper::check_api_key`]). Health routes are exempt.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![recursion_limit = "256"]
 
 pub mod audit;
 pub mod auth_hyper;
@@ -32,6 +33,7 @@ pub mod keyring;
 pub mod maintenance;
 pub mod middleware;
 pub mod middleware_hyper;
+pub mod openapi;
 pub mod state;
 pub mod validation;
 
@@ -75,6 +77,7 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
     Router::new()
         .route(Method::GET, "/health", wrap(hyper_compat::health_handler()))
         .route(Method::GET, "/healthz", wrap(hyper_compat::health_handler()))
+        .route(Method::GET, "/api/openapi.json", wrap(openapi::openapi_handler()))
         .route(
             Method::POST,
             "/api/schemas",
