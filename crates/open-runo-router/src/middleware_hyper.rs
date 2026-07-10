@@ -62,12 +62,26 @@ pub fn with_cors(inner: Handler) -> Handler {
     })
 }
 
-/// Wrap `inner` with a per-client rate limit, keyed the same way as the
-/// poem `RateLimit` middleware (`X-Forwarded-For` / `X-Real-IP`, falling
-/// back to a single shared bucket).
-pub fn with_rate_limit(inner: Handler, max_requests: u32, window_secs: i64) -> Handler {
-    let limiter = Arc::new(RateLimiter::new(max_requests, chrono::Duration::seconds(window_secs)));
+/// Wrap `inner` so every request/response pair is logged via `tracing`.
+/// Poem-free equivalent of `poem::middleware::Tracing`.
+pub fn with_tracing(inner: Handler) -> Handler {
+    Arc::new(move |req, params| {
+        let inner = Arc::clone(&inner);
+        let method = req.method().clone();
+        let path = req.uri().path().to_string();
+        Box::pin(async move {
+            let resp = inner(req, params).await;
+            tracing::info!(%method, %path, status = %resp.status(), "request");
+            resp
+        })
+    })
+}
 
+/// Wrap `inner` with a per-client rate limit backed by `limiter`. Shared
+/// across every route in an app so the budget is global, not per-route —
+/// build one `Arc<RateLimiter>` per app with [`build_rate_limiter`] and
+/// pass clones of it to each route's wrapper.
+pub fn with_shared_rate_limit(inner: Handler, limiter: Arc<RateLimiter>) -> Handler {
     Arc::new(move |req, params| {
         let inner = Arc::clone(&inner);
         let limiter = Arc::clone(&limiter);
@@ -86,6 +100,21 @@ pub fn with_rate_limit(inner: Handler, max_requests: u32, window_secs: i64) -> H
             inner(req, params).await
         })
     })
+}
+
+/// Construct a rate limiter suitable for [`with_shared_rate_limit`].
+pub fn build_rate_limiter(max_requests: u32, window_secs: i64) -> Arc<RateLimiter> {
+    Arc::new(RateLimiter::new(max_requests, chrono::Duration::seconds(window_secs)))
+}
+
+/// Wrap `inner` with a per-client rate limit, keyed the same way as the
+/// poem `RateLimit` middleware (`X-Forwarded-For` / `X-Real-IP`, falling
+/// back to a single shared bucket). Convenience wrapper over
+/// [`with_shared_rate_limit`] for callers that only need a single route
+/// (e.g. tests); apps with multiple routes should build one limiter with
+/// [`build_rate_limiter`] and share it via [`with_shared_rate_limit`].
+pub fn with_rate_limit(inner: Handler, max_requests: u32, window_secs: i64) -> Handler {
+    with_shared_rate_limit(inner, build_rate_limiter(max_requests, window_secs))
 }
 
 #[cfg(test)]
