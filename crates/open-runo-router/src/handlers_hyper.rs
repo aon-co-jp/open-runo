@@ -8,7 +8,7 @@ use crate::auth_hyper::check_api_key;
 use crate::hyper_compat::{empty_status, json_response, query_params, read_json_body, Handler};
 use crate::keyring::KeyGuardian;
 use crate::state::AppState;
-use crate::validation::REGISTER_SCHEMA_REQUEST;
+use crate::validation::{DB_UPSERT_REQUEST, REGISTER_SCHEMA_REQUEST};
 use hyper::StatusCode;
 use open_runo_schema_registry::{Stage, DEFAULT_NAMESPACE};
 use serde::{Deserialize, Serialize};
@@ -240,6 +240,200 @@ pub fn db_routing_handler(guardian: Arc<KeyGuardian>) -> Handler {
                     default_target: "postgresql".into(),
                     entries,
                 },
+            )
+        })
+    })
+}
+
+fn parse_value(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw).unwrap_or(serde_json::Value::String(raw.to_string()))
+}
+
+#[derive(Serialize)]
+struct RecordItem {
+    key: String,
+    value: serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct RecordListResponse {
+    table: String,
+    count: usize,
+    records: Vec<RecordItem>,
+}
+
+/// GET /api/db/:table — poem-free port of `handlers::db::db_list`.
+pub fn db_list_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let table = params.get("table").unwrap_or("").to_string();
+            let records = match state.db.list(&table).await {
+                Ok(r) => r,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+            let items: Vec<RecordItem> = records
+                .into_iter()
+                .map(|r| RecordItem { key: r.key, value: parse_value(&r.value) })
+                .collect();
+            json_response(
+                StatusCode::OK,
+                &RecordListResponse { count: items.len(), table, records: items },
+            )
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct RecordResponse {
+    table: String,
+    key: String,
+    value: serde_json::Value,
+}
+
+/// GET /api/db/:table/:key — poem-free port of `handlers::db::db_get`.
+pub fn db_get_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let table = params.get("table").unwrap_or("").to_string();
+            let key = params.get("key").unwrap_or("").to_string();
+            match state.db.get(&table, &key).await {
+                Ok(Some(raw)) => json_response(
+                    StatusCode::OK,
+                    &RecordResponse { table, key, value: parse_value(&raw) },
+                ),
+                Ok(None) => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("record not found: {table}/{key}") }),
+                ),
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+#[derive(Deserialize)]
+struct UpsertBody {
+    value: serde_json::Value,
+}
+
+/// PUT /api/db/:table/:key — poem-free port of `handlers::db::db_put`.
+pub fn db_put_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let table = params.get("table").unwrap_or("").to_string();
+            let key = params.get("key").unwrap_or("").to_string();
+
+            let raw: serde_json::Value = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let errors: Vec<String> = DB_UPSERT_REQUEST
+                .iter_errors(&raw)
+                .map(|e| format!("{} (at {})", e, e.instance_path))
+                .collect();
+            if !errors.is_empty() {
+                return json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({
+                        "error": format!("request body failed validation: {}", errors.join("; "))
+                    }),
+                );
+            }
+
+            let body: UpsertBody = match serde_json::from_value(raw) {
+                Ok(b) => b,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        &serde_json::json!({ "error": format!("deserialize body: {e}") }),
+                    )
+                }
+            };
+
+            let serialized = match serde_json::to_string(&body.value) {
+                Ok(s) => s,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &serde_json::json!({ "error": format!("serialize value: {e}") }),
+                    )
+                }
+            };
+
+            if let Err(e) = state.db.put(&table, &key, &serialized).await {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                );
+            }
+
+            crate::audit::record(&state, &actor, "db.put", format!("{table}/{key}")).await;
+
+            json_response(
+                StatusCode::OK,
+                &RecordResponse { table, key, value: body.value },
+            )
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct DeleteResponse {
+    table: String,
+    key: String,
+    deleted: bool,
+}
+
+/// DELETE /api/db/:table/:key — poem-free port of `handlers::db::db_delete`.
+pub fn db_delete_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let table = params.get("table").unwrap_or("").to_string();
+            let key = params.get("key").unwrap_or("").to_string();
+
+            if let Err(e) = state.db.delete(&table, &key).await {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({ "error": e.to_string() }),
+                );
+            }
+
+            crate::audit::record(&state, &actor, "db.delete", format!("{table}/{key}")).await;
+
+            json_response(
+                StatusCode::OK,
+                &DeleteResponse { table, key, deleted: true },
             )
         })
     })
@@ -1009,6 +1203,107 @@ mod tests {
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/api/federation/compose"))
             .json(&serde_json::json!({ "services": [] }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    fn db_router(state: &Arc<AppState>, guardian: Arc<KeyGuardian>) -> Router {
+        Router::new()
+            .route(Method::GET, "/api/db/:table", db_list_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::GET, "/api/db/:table/:key", db_get_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::PUT, "/api/db/:table/:key", db_put_handler(Arc::clone(state), Arc::clone(&guardian)))
+            .route(Method::DELETE, "/api/db/:table/:key", db_delete_handler(Arc::clone(state), guardian))
+    }
+
+    #[tokio::test]
+    async fn db_crud_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = db_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+        let key = "x-api-key";
+
+        let resp = client
+            .put(format!("http://{addr}/api/db/test_table/rec1"))
+            .header(key, "test-key")
+            .json(&serde_json::json!({ "value": { "hello": "world" } }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .get(format!("http://{addr}/api/db/test_table/rec1"))
+            .header(key, "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["value"]["hello"], "world");
+
+        let resp = client
+            .get(format!("http://{addr}/api/db/test_table"))
+            .header(key, "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["count"], 1);
+
+        let resp = client
+            .delete(format!("http://{addr}/api/db/test_table/rec1"))
+            .header(key, "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .get(format!("http://{addr}/api/db/test_table/rec1"))
+            .header(key, "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn db_get_missing_key_returns_404() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = db_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/db/schemas/nonexistent"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn db_put_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = db_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .put(format!("http://{addr}/api/db/test_table/rec1"))
+            .json(&serde_json::json!({ "value": 1 }))
             .send()
             .await
             .expect("request should succeed");
