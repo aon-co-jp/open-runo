@@ -7,17 +7,19 @@ This document maps the conceptual architecture described in `README-Japan.md` /
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  apps/desktop/  — Tauri 2 Desktop App                       │
+│  apps/desktop-wasm/  — Rust → WebAssembly Desktop App        │
 │  ┌───────────────────────────┐  ┌────────────────────────┐  │
-│  │ TypeScript + HTML5 + CSS3 │  │  src-tauri/ (Rust)     │  │
-│  │ Bootstrap 5 SPA           │  │  Tauri commands →      │  │
-│  │ src/api/client.ts         │  │  reqwest → router      │  │
+│  │ src/pages.rs (Rust, DOM    │  │  src/api.rs (Rust)     │  │
+│  │ via web_sys, no framework) │  │  fetch() → router,     │  │
+│  │ wasm32-unknown-unknown     │  │  no Tauri IPC bridge   │  │
 │  └───────────────────────────┘  └────────────────────────┘  │
+│  Served directly by open-runo-router at GET / and /pkg/*     │
 └─────────────────────────────────────────────────────────────┘
-                          │ HTTP (localhost)
+                          │ HTTP (same-origin)
 ┌─────────────────────────────────────────────────────────────┐
-│  crates/open-runo-router/  — Poem Gateway (Rust)             │
-│  REST API · ApiKeyAuth · RateLimit · Tracing                │
+│  crates/open-runo-router/  — tokio/hyper Gateway (Rust)       │
+│  REST API · X-Api-Key auth · rate limit · tracing, all       │
+│  hand-implemented on hyper_compat (no Poem dependency)        │
 └─────────────────────────────────────────────────────────────┘
           │               │               │
  open-runo-federation  open-runo-schema  open-runo-ai-routing

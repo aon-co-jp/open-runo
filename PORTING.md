@@ -29,7 +29,7 @@ WunderGraph Cosmo の有料版（Launch / Scale / Enterprise）機能を OSS で
 open-runo/
 ├── Cargo.toml / Cargo.lock      ← workspace 定義（バージョン固定）
 ├── crates/                      ← 15 クレート（本体）
-├── apps/desktop/                ← Tauri 2 管理アプリ（任意）
+├── apps/desktop-wasm/            ← Rust→WebAssembly 管理アプリ（任意、open-runo-routerが自前配信）
 ├── docs/                        ← 設計・API 仕様・migration.md ほか
 ├── .github/workflows/ci.yml     ← fmt / clippy -D warnings / test
 ├── Dockerfile / docker-compose.yml / Makefile
