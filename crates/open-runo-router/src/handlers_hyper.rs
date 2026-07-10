@@ -843,6 +843,150 @@ pub fn get_persisted_query_handler(state: Arc<AppState>, guardian: Arc<KeyGuardi
     })
 }
 
+#[derive(Deserialize)]
+struct PurgeRequest {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct PurgeResponse {
+    purged: String,
+}
+
+/// POST /api/cache/purge — poem-free port of `handlers::cache::purge_page`.
+pub fn purge_page_handler(
+    state: Arc<AppState>,
+    cache: Arc<crate::middleware::html_cache::HtmlPageCache>,
+    guardian: Arc<KeyGuardian>,
+) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let cache = Arc::clone(&cache);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let body: PurgeRequest = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+            cache.purge(&body.path).await;
+            crate::audit::record(&state, &actor, "cache.purge", body.path.clone()).await;
+            json_response(StatusCode::OK, &PurgeResponse { purged: body.path })
+        })
+    })
+}
+
+/// POST /api/cache/purge-all — poem-free port of
+/// `handlers::cache::purge_all_pages`.
+pub fn purge_all_pages_handler(
+    state: Arc<AppState>,
+    cache: Arc<crate::middleware::html_cache::HtmlPageCache>,
+    guardian: Arc<KeyGuardian>,
+) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let cache = Arc::clone(&cache);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            cache.purge_all().await;
+            crate::audit::record(&state, &actor, "cache.purge_all", "*").await;
+            json_response(StatusCode::OK, &PurgeResponse { purged: "*".to_string() })
+        })
+    })
+}
+
+#[derive(Serialize)]
+struct PatternStat {
+    pattern: String,
+    requests: u64,
+    arrival_interval_secs: Option<f64>,
+    update_interval_secs: Option<f64>,
+    render_cost_secs: Option<f64>,
+}
+
+#[derive(Serialize)]
+struct AiStatsResponse {
+    ai_enabled: bool,
+    cache_hits: u64,
+    cache_misses: u64,
+    admitted: u64,
+    rejected: u64,
+    hit_ratio: f64,
+    tracked_keys: usize,
+    tracked_patterns: usize,
+    top_patterns: Vec<PatternStat>,
+}
+
+/// GET /api/cache/ai-stats — poem-free port of `handlers::cache::ai_stats`.
+pub fn ai_stats_handler(
+    cache: Arc<crate::middleware::html_cache::HtmlPageCache>,
+    guardian: Arc<KeyGuardian>,
+) -> Handler {
+    Arc::new(move |req, _params| {
+        let cache = Arc::clone(&cache);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let resp = match cache.predictor() {
+                None => AiStatsResponse {
+                    ai_enabled: false,
+                    cache_hits: 0,
+                    cache_misses: 0,
+                    admitted: 0,
+                    rejected: 0,
+                    hit_ratio: 0.0,
+                    tracked_keys: 0,
+                    tracked_patterns: 0,
+                    top_patterns: Vec::new(),
+                },
+                Some(p) => {
+                    let snap = p.snapshot();
+                    let total = snap.outcomes.cache_hits + snap.outcomes.cache_misses;
+                    let mut patterns: Vec<PatternStat> = snap
+                        .patterns
+                        .iter()
+                        .map(|(k, s)| PatternStat {
+                            pattern: k.clone(),
+                            requests: s.requests,
+                            arrival_interval_secs: s.arrival_interval_secs,
+                            update_interval_secs: s.update_interval_secs,
+                            render_cost_secs: s.render_cost_secs,
+                        })
+                        .collect();
+                    patterns.sort_by(|a, b| b.requests.cmp(&a.requests));
+                    patterns.truncate(20);
+
+                    AiStatsResponse {
+                        ai_enabled: true,
+                        cache_hits: snap.outcomes.cache_hits,
+                        cache_misses: snap.outcomes.cache_misses,
+                        admitted: snap.outcomes.admitted,
+                        rejected: snap.outcomes.rejected,
+                        hit_ratio: if total == 0 {
+                            0.0
+                        } else {
+                            snap.outcomes.cache_hits as f64 / total as f64
+                        },
+                        tracked_keys: snap.keys.len(),
+                        tracked_patterns: snap.patterns.len(),
+                        top_patterns: patterns,
+                    }
+                }
+            };
+            json_response(StatusCode::OK, &resp)
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1480,5 +1624,73 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn cache_purge_endpoints_respond() {
+        use crate::middleware::html_cache::{HtmlCacheConfig, HtmlPageCache};
+
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let cache = Arc::new(HtmlPageCache::new(HtmlCacheConfig::from_env()));
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/cache/purge",
+                purge_page_handler(Arc::clone(&state), Arc::clone(&cache), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::POST,
+                "/api/cache/purge-all",
+                purge_all_pages_handler(Arc::clone(&state), Arc::clone(&cache), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/cache/purge"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "path": "/page/123" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["purged"], "/page/123");
+
+        let resp = client
+            .post(format!("http://{addr}/api/cache/purge-all"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn ai_stats_reports_disabled_when_no_predictor() {
+        use crate::middleware::html_cache::{HtmlCacheConfig, HtmlPageCache};
+
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let mut config = HtmlCacheConfig::from_env();
+        config.ai = false;
+        let cache = Arc::new(HtmlPageCache::new(config));
+        let router = Router::new().route(Method::GET, "/api/cache/ai-stats", ai_stats_handler(cache, guardian));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/cache/ai-stats"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["ai_enabled"], false);
     }
 }
