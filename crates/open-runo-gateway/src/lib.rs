@@ -14,6 +14,8 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod graphql_hyper;
+
 use async_graphql::{Context, Object, Schema, SimpleObject, Subscription};
 use async_graphql_poem::{GraphQLRequest, GraphQLResponse};
 use open_runo_cache::{Cache, InMemoryTtlCache};

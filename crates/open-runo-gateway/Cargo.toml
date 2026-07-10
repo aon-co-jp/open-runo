@@ -31,6 +31,8 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 async-graphql = { workspace = true }
 async-graphql-poem = { workspace = true }
+hyper = { version = "1.10", features = ["full"] }
 
 [dev-dependencies]
 poem = { workspace = true, features = ["test"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

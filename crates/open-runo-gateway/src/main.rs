@@ -1,11 +1,17 @@
 //! open-runo full-stack binary: REST gateway + GraphQL endpoint.
 //!
-//! Mounts the complete `open-runo-router` REST surface at `/` and the
-//! federated GraphQL endpoint at `/graphql`, sharing one `AppState`.
+//! Mounts the complete `open-runo-router` REST surface (including the WASM
+//! frontend bundle) at `/` and the versionless GraphQL endpoint at
+//! `/graphql`, sharing one `AppState`. Runs on the poem-free
+//! `hyper_compat` stack (see CLAUDE.md HANDOFF).
+//!
+//! **Scope note**: GraphQL Subscriptions over WebSocket are not available
+//! on this binary yet (see `open_runo_gateway::graphql_hyper`'s doc
+//! comment) — only `GET /graphql` (GraphiQL) and `POST /graphql` (query
+//! execution).
 
 use open_runo_core::Config;
-use open_runo_router::{build_app, rate_limit::RateLimit, state::AppState};
-use poem::Route;
+use open_runo_router::{build_hyper_app, hyper_compat, state::AppState};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -21,19 +27,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let state = Arc::new(AppState::new());
-    let rate_limit = RateLimit::new(
+    let (graphiql, graphql_post) = open_runo_gateway::graphql_hyper::graphql_handlers(Arc::clone(&state));
+
+    let app = build_hyper_app(
+        state,
         config.rate_limit_max_requests,
         config.rate_limit_window_secs as i64,
-    );
-    let rest_app = build_app(Arc::clone(&state), rate_limit);
-    let graphql_app = open_runo_gateway::graphql_route(Arc::clone(&state));
+    )
+    .route(hyper::Method::GET, "/graphql", graphiql)
+    .route(hyper::Method::POST, "/graphql", graphql_post);
 
-    // Mount the REST surface at the root and the versionless GraphQL
-    // gateway at `/graphql`, sharing the same `AppState`.
-    let app = Route::new().nest("/", rest_app).nest("/graphql", graphql_app);
-
-    let listener = poem::listener::TcpListener::bind(&config.bind_addr);
-    poem::Server::new(listener).run(app).await?;
+    let addr = config
+        .bind_addr
+        .parse()
+        .map_err(|e| format!("invalid bind_addr {:?}: {e}", config.bind_addr))?;
+    let (bound, handle) = hyper_compat::serve(app, addr).await?;
+    tracing::info!(%bound, "open-runo-gateway listening");
+    handle.await?;
 
     Ok(())
 }

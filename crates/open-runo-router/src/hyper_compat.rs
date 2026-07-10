@@ -62,6 +62,15 @@ pub fn empty_status(status: StatusCode) -> Response {
         .expect("building a response from a fixed set of valid headers cannot fail")
 }
 
+/// Build an `text/html; charset=utf-8` response (e.g. for GraphiQL).
+pub fn html_response(status: StatusCode, html: impl Into<String>) -> Response {
+    HyperResponse::builder()
+        .status(status)
+        .header("content-type", "text/html; charset=utf-8")
+        .body(fixed_body(Bytes::from(html.into())))
+        .expect("building a response from a fixed set of valid headers cannot fail")
+}
+
 /// One Server-Sent Event: an optional `event:` type and its `data:` payload.
 pub struct SseEvent {
     pub event_type: Option<&'static str>,
