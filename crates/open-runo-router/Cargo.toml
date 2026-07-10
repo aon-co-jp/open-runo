@@ -27,6 +27,7 @@ open-runo-persisted-queries = { workspace = true }
 open-runo-scim             = { workspace = true }
 open-runo-cache            = { workspace = true }
 open-runo-api-types        = { workspace = true }
+schemars = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 open-runo-db               = { workspace = true }

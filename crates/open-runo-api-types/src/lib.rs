@@ -17,14 +17,23 @@
 //! Pure data types only: no I/O, no async runtime. This crate must compile
 //! for `wasm32-unknown-unknown` as well as native targets, since
 //! `apps/desktop-wasm` (a separate Cargo workspace) depends on it too.
+//!
+//! Every type here also derives [`schemars::JsonSchema`], which
+//! `open-runo-router::openapi` uses to generate `components.schemas` in
+//! the served OpenAPI document directly from these structs -- so the
+//! published API spec (and any TypeScript/JS/other-language types a
+//! caller generates from it, e.g. via `openapi-typescript`) can't drift
+//! from what the server actually sends, the same problem this crate was
+//! created to solve for the Rust clients.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// A single registered schema version, as returned by `POST /api/schemas`,
 /// `GET /api/schemas/:service`, and (as `SchemaHistoryResponse::versions`)
 /// `GET /api/schemas/:service/history`. All three endpoints return this
 /// exact shape so a client only has to know it once.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct SchemaVersion {
     pub id: String,
     pub namespace: String,
@@ -39,7 +48,7 @@ fn default_stage() -> String {
 }
 
 /// Request body for `POST /api/schemas`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RegisterSchemaRequest {
     pub service_name: String,
     pub sdl: String,
@@ -50,13 +59,13 @@ pub struct RegisterSchemaRequest {
 }
 
 /// Response body for `GET /api/schemas/:service/history`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SchemaHistoryResponse {
     pub versions: Vec<SchemaVersion>,
 }
 
 /// Response body for `GET /api/federation/status`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct FederationStatusResponse {
     pub contributing_services: Vec<String>,
     pub type_count: usize,
@@ -68,7 +77,7 @@ pub struct FederationStatusResponse {
 /// appears as the standard `Retry-After` response header -- it's repeated
 /// in the body so clients that only look at JSON (rather than headers)
 /// still get it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct RateLimitedResponse {
     pub error: String,
     pub retry_after_secs: i64,
@@ -115,4 +124,5 @@ mod tests {
         let back: RateLimitedResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.retry_after_secs, 42);
     }
+
 }

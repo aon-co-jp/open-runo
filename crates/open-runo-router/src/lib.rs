@@ -300,6 +300,12 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
                 "image/svg+xml",
             )),
         )
+        // Every route above registers only its actual method; without this,
+        // a cross-origin browser's CORS preflight (OPTIONS) has no handler
+        // to reach and the router's own dispatch fallback answers with a
+        // bare 405 before with_cors (or any middleware) ever runs. See
+        // Router::with_cors_preflight's doc comment.
+        .with_cors_preflight()
 }
 
 /// Resolve the WASM frontend's static asset directory. Defaults to
@@ -357,6 +363,36 @@ mod hyper_app_tests {
 
         // CORS header present on a normal (non-preflight) response too.
         assert!(resp.headers().contains_key("access-control-allow-origin"));
+    }
+
+    /// A cross-origin browser sending `X-Api-Key` (a non-simple header)
+    /// must first send an `OPTIONS` preflight and get a `2xx` with CORS
+    /// headers back before it will send the real request at all. Every
+    /// route in `build_hyper_app` registers only its own method (GET/
+    /// POST/etc.), never OPTIONS -- without `Router::with_cors_preflight`
+    /// wired in, this preflight hit the router's own bare-405 fallback
+    /// and no cross-origin browser client could ever call any
+    /// `api_key_security()`-protected route. Found via an actual
+    /// cross-origin browser test (see CLAUDE.md HANDOFF, 2026-07-11).
+    #[tokio::test]
+    async fn hyper_app_answers_cors_preflight_on_a_real_protected_route() {
+        let state = Arc::new(AppState::new());
+        let app = build_hyper_app(state, 1_000, 60);
+        let (addr, _handle) = hyper_compat::serve(app, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .request(reqwest::Method::OPTIONS, format!("http://{addr}/api/federation/status"))
+            .header("origin", "https://example.com")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "x-api-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert!(resp.headers().contains_key("access-control-allow-origin"));
+        assert!(resp.headers().contains_key("access-control-allow-headers"));
     }
 
     #[tokio::test]
