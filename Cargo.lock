@@ -2211,9 +2211,12 @@ dependencies = [
  "percent-encoding",
  "pin-project-lite",
  "socket2 0.6.4",
+ "system-configuration",
  "tokio",
+ "tower-layer",
  "tower-service",
  "tracing",
+ "windows-registry",
 ]
 
 [[package]]
@@ -3328,9 +3331,13 @@ dependencies = [
 name = "open-runo-router"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "chrono",
  "futures",
  "hex",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "jsonschema",
  "jsonwebtoken",
  "once_cell",
@@ -3346,6 +3353,7 @@ dependencies = [
  "open-runo-scim",
  "open-runo-security",
  "poem",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

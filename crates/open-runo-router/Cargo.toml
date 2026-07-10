@@ -39,7 +39,12 @@ uuid = { workspace = true }
 futures = { workspace = true }
 jsonschema = { workspace = true }
 once_cell = { workspace = true }
+hyper = { version = "1.10", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+bytes = "1.9"
 
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
 poem = { workspace = true, features = ["test"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

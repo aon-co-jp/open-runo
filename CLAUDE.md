@@ -1,15 +1,16 @@
-# 【廃止】このリポジトリは poem-cosmo-tauri に統合されました(2026-07-10)
+# 技術スタック・開発ルール(open-runo)
 
-ユーザー指示により、今後の開発は https://github.com/aon-co-jp/poem-cosmo-tauri
-に一本化されました。**このリポジトリへは今後コミットしません。**
-最終方針: Tauri・Poem・WunderGraph Cosmo(有料版含む)を外部パッケージ/
-ライブラリとして直接依存させることはせず、各ツールが提供する機能・API形状・
-体験には互換性を保ちながらRust標準ライブラリ + tokio/hyperで自前実装する。
-詳細・以降の開発ルールは poem-cosmo-tauri 側の `CLAUDE.md` を参照してください。
-
----
-
-# 技術スタック・開発ルール(open-runo、旧内容・参考用)
+**このリポジトリは廃止されていません。** 2026-07-10にユーザー指示により、
+[`poem-cosmo-tauri`](https://github.com/aon-co-jp/poem-cosmo-tauri) と
+**同時並行で開発**する方針に変更されました。両リポジトリとも
+**Tauri・Poem を含めない**構成で進めます(open-runoはさらに厳密に
+Tauri/Poemを一切含まない方針。poem-cosmo-tauri側は互換性維持のため
+名称にPoem/Tauriを残しつつ実体はTauri/Poem非依存)。共通点: どちらも
+WunderGraph Cosmo(有料版含む)をパッケージとして直接依存させず、
+Rust標準ライブラリ + tokio/hyperで機能を自前実装する。
+実装作業(例: crates/open-runo-routerのPoem→tokio/hyper移行)は
+poem-cosmo-tauri側で先行し、動作確認が取れたファイルをこちらにも
+ミラーしていく運用とする。
 
 このリポジトリ、および関連プロジェクト(`open-web-server`/`aruaru-db`/
 `aruaru-web`/`open-raid-z`)で開発・保守を行う際は、以下を基本方針とする。
@@ -42,10 +43,11 @@
 
 ## 関連プロジェクト
 
-- **poem-cosmo-tauri**(正本・一本化先。GraphQL Federation / API Gateway /
-  AI-native routing platform): https://github.com/aon-co-jp/poem-cosmo-tauri
-- **open-runo**(このリポジトリ。2026-07-10付けで廃止・poem-cosmo-tauriへ
-  統合。今後更新しない): https://github.com/aon-co-jp/open-runo
+- **poem-cosmo-tauri**(姉妹リポジトリ・同時並行開発。GraphQL Federation /
+  API Gateway / AI-native routing platform。実装の先行地点):
+  https://github.com/aon-co-jp/poem-cosmo-tauri
+- **open-runo**(このリポジトリ。2026-07-10付けで開発再開・poem-cosmo-tauri
+  と同時並行で開発): https://github.com/aon-co-jp/open-runo
 - **open-web-server**: https://github.com/aon-co-jp/open-web-server
 - **aruaru-db**: https://github.com/aon-co-jp/aruaru-db
 - **aruaru-web**: https://github.com/aon-co-jp/aruaru-web
