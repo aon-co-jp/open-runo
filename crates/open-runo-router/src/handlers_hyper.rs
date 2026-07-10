@@ -81,6 +81,99 @@ pub fn federation_status_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct ServiceInput {
+    service_name: String,
+    types: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ComposeRequest {
+    services: Vec<ServiceInput>,
+}
+
+#[derive(Serialize)]
+struct ComposeResponse {
+    contributing_services: Vec<String>,
+    types: std::collections::BTreeMap<String, Vec<String>>,
+    breaking_changes: Vec<String>,
+}
+
+/// POST /api/federation/compose — poem-free port of
+/// `handlers::federation::compose_schemas`.
+pub fn compose_schemas_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let body: ComposeRequest = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let service_schemas: Vec<open_runo_federation::ServiceSchema> = body
+                .services
+                .into_iter()
+                .map(|s| open_runo_federation::ServiceSchema {
+                    service_name: s.service_name,
+                    types: s
+                        .types
+                        .into_iter()
+                        .map(|(k, v)| (k, std::collections::BTreeSet::from_iter(v)))
+                        .collect(),
+                })
+                .collect();
+
+            let new_composed = match open_runo_federation::compose(&service_schemas) {
+                Ok(c) => c,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        &serde_json::json!({ "error": e.to_string() }),
+                    )
+                }
+            };
+
+            let breaking = {
+                let previous = state
+                    .federation_schema
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if previous.contributing_services.is_empty() {
+                    vec![]
+                } else {
+                    open_runo_federation::detect_breaking_changes(&previous, &new_composed)
+                }
+            };
+
+            let contributing_services = new_composed.contributing_services.clone();
+            let types_out: std::collections::BTreeMap<String, Vec<String>> = new_composed
+                .types
+                .iter()
+                .map(|(k, v)| (k.clone(), v.iter().cloned().collect()))
+                .collect();
+
+            *state
+                .federation_schema
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = new_composed;
+
+            json_response(
+                StatusCode::OK,
+                &ComposeResponse {
+                    contributing_services,
+                    types: types_out,
+                    breaking_changes: breaking,
+                },
+            )
+        })
+    })
+}
+
 #[derive(Serialize)]
 struct DbStatus {
     backend: &'static str,
@@ -849,6 +942,73 @@ mod tests {
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/api/ai/route"))
             .json(&serde_json::json!({ "policy": "cost", "candidates": [] }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn compose_and_status_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/federation/compose",
+                compose_schemas_handler(Arc::clone(&state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/federation/status",
+                federation_status_handler(Arc::clone(&state), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/federation/compose"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({
+                "services": [
+                    { "service_name": "users", "types": { "User": ["id", "name"] } },
+                    { "service_name": "billing", "types": { "Invoice": ["id", "amount"] } }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .get(format!("http://{addr}/api/federation/status"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["type_count"], 2);
+    }
+
+    #[tokio::test]
+    async fn compose_schemas_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/federation/compose",
+            compose_schemas_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/federation/compose"))
+            .json(&serde_json::json!({ "services": [] }))
             .send()
             .await
             .expect("request should succeed");
