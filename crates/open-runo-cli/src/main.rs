@@ -7,9 +7,17 @@
 //! short-lived developer key via `POST /api/keys/self-issue` -- the same
 //! "a human never has to manage an API key" flow the WASM frontend uses
 //! (see `crates/open-runo-router/src/handlers_hyper.rs::self_issue_key_handler`).
+//!
+//! Schema and federation responses are decoded through
+//! `open_runo_api_types`, the same shared types `open-runo-router` and the
+//! WASM frontend use -- so a server-side shape change is a compile error
+//! here instead of the silent runtime mismatch that shipped in this CLI's
+//! first version (see CLAUDE.md HANDOFF, 2026-07-11).
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use open_runo_api_types::{FederationStatusResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion};
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::path::PathBuf;
 
@@ -102,39 +110,51 @@ async fn main() -> Result<()> {
         None => self_issue_key(&client, &cli.base_url).await?,
     };
 
+    // Schema/federation calls decode into the shared open_runo_api_types
+    // structs (typed, so a server-side shape change is a compile error
+    // here); Login/Openapi have no shared type (a bare key string, and an
+    // arbitrary OpenAPI document) so they stay as raw JSON.
     let body = match &cli.command {
         Command::Login => {
             // Already self-issued above; just confirm it to the user.
             serde_json::json!({ "api_key": api_key })
         }
-        Command::Openapi => get(&client, &cli.base_url, &api_key, "/api/openapi.json").await?,
+        Command::Openapi => get::<Value>(&client, &cli.base_url, &api_key, "/api/openapi.json").await?,
         Command::Federation { action } => match action {
-            FederationCommand::Status => get(&client, &cli.base_url, &api_key, "/api/federation/status").await?,
+            FederationCommand::Status => {
+                let resp: FederationStatusResponse =
+                    get(&client, &cli.base_url, &api_key, "/api/federation/status").await?;
+                serde_json::to_value(resp)?
+            }
         },
         Command::Schema { action } => match action {
             SchemaCommand::Register { service, sdl_file, stage } => {
                 let sdl = std::fs::read_to_string(sdl_file)
                     .with_context(|| format!("reading SDL file {}", sdl_file.display()))?;
-                let payload = serde_json::json!({
-                    "service_name": service,
-                    "sdl": sdl,
-                    "stage": stage,
-                });
-                post(&client, &cli.base_url, &api_key, "/api/schemas", &payload).await?
+                let payload = RegisterSchemaRequest {
+                    service_name: service.clone(),
+                    sdl,
+                    stage: stage.clone(),
+                    namespace: None,
+                };
+                let resp: SchemaVersion = post(&client, &cli.base_url, &api_key, "/api/schemas", &payload).await?;
+                serde_json::to_value(resp)?
             }
             SchemaCommand::Get { service, stage, namespace } => {
                 let path = with_query(
                     &format!("/api/schemas/{service}"),
                     &[("stage", Some(stage.as_str())), ("namespace", namespace.as_deref())],
                 );
-                get(&client, &cli.base_url, &api_key, &path).await?
+                let resp: SchemaVersion = get(&client, &cli.base_url, &api_key, &path).await?;
+                serde_json::to_value(resp)?
             }
             SchemaCommand::History { service, namespace } => {
                 let path = with_query(
                     &format!("/api/schemas/{service}/history"),
                     &[("namespace", namespace.as_deref())],
                 );
-                get(&client, &cli.base_url, &api_key, &path).await?
+                let resp: SchemaHistoryResponse = get(&client, &cli.base_url, &api_key, &path).await?;
+                serde_json::to_value(resp)?
             }
         },
     };
@@ -238,7 +258,7 @@ async fn self_issue_key(client: &reqwest::Client, base_url: &str) -> Result<Stri
         .context("self-issue response had no api_key field")
 }
 
-async fn get(client: &reqwest::Client, base_url: &str, api_key: &str, path: &str) -> Result<Value> {
+async fn get<T: DeserializeOwned>(client: &reqwest::Client, base_url: &str, api_key: &str, path: &str) -> Result<T> {
     let resp = client
         .get(format!("{base_url}{path}"))
         .header("X-Api-Key", api_key)
@@ -248,7 +268,13 @@ async fn get(client: &reqwest::Client, base_url: &str, api_key: &str, path: &str
     decode(resp).await
 }
 
-async fn post(client: &reqwest::Client, base_url: &str, api_key: &str, path: &str, payload: &Value) -> Result<Value> {
+async fn post<Req: serde::Serialize, T: DeserializeOwned>(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    path: &str,
+    payload: &Req,
+) -> Result<T> {
     let resp = client
         .post(format!("{base_url}{path}"))
         .header("X-Api-Key", api_key)
@@ -259,13 +285,16 @@ async fn post(client: &reqwest::Client, base_url: &str, api_key: &str, path: &st
     decode(resp).await
 }
 
-async fn decode(resp: reqwest::Response) -> Result<Value> {
+/// Decode a response as JSON, first checking the status so a non-2xx
+/// error body (which won't match `T`) produces a readable error instead
+/// of a confusing deserialize failure.
+async fn decode<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T> {
     let status = resp.status();
     let body: Value = resp.json().await.context("decoding response as JSON")?;
     if !status.is_success() {
         bail!("request failed ({status}): {body}");
     }
-    Ok(body)
+    serde_json::from_value(body).context("response JSON did not match the expected shape")
 }
 
 fn print_human(command: &Command, body: &Value) {

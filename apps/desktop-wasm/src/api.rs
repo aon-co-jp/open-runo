@@ -6,6 +6,7 @@
 //! host process — the WASM bundle and the API it calls are served by the
 //! same `open-runo-router` binary, so this is a same-origin call.
 
+use open_runo_api_types::{FederationStatusResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use wasm_bindgen::{JsCast, JsValue};
@@ -83,41 +84,10 @@ pub struct Health {
     pub version: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct RegisterSchemaRequest<'a> {
-    pub service_name: &'a str,
-    pub sdl: &'a str,
-    pub stage: &'a str,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RegisterSchemaResponse {
-    pub id: String,
-    pub namespace: String,
-    pub service_name: String,
-    pub stage: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SchemaVersion {
-    pub id: String,
-    pub service_name: String,
-    pub stage: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SchemaHistoryResponse {
-    pub versions: Vec<SchemaVersion>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FederationStatusResponse {
-    pub contributing_services: Vec<String>,
-    pub type_count: usize,
-    pub field_count: usize,
-}
+// RegisterSchemaRequest/SchemaVersion/SchemaHistoryResponse/
+// FederationStatusResponse now live in open_runo_api_types (imported
+// above) -- shared with open-runo-router and open-runo-cli so the wire
+// shape can't drift between them again (see CLAUDE.md HANDOFF, 2026-07-11).
 
 #[derive(Debug, Serialize)]
 pub struct AiRouteCandidate<'a> {
@@ -225,14 +195,15 @@ pub async fn health_check() -> Result<Health, String> {
     get_json::<Health>("/health").await
 }
 
-pub async fn register_schema(
-    service_name: &str,
-    sdl: &str,
-    stage: &str,
-) -> Result<RegisterSchemaResponse, String> {
+pub async fn register_schema(service_name: &str, sdl: &str, stage: &str) -> Result<SchemaVersion, String> {
     post_json(
         "/api/schemas",
-        &RegisterSchemaRequest { service_name, sdl, stage },
+        &RegisterSchemaRequest {
+            service_name: service_name.to_string(),
+            sdl: sdl.to_string(),
+            stage: stage.to_string(),
+            namespace: None,
+        },
     )
     .await
 }

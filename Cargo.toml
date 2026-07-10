@@ -16,6 +16,7 @@ members = [
     "crates/open-runo-scim",
     "crates/open-runo-cache",
     "crates/open-runo-cli",
+    "crates/open-runo-api-types",
 ]
 
 resolver = "2"
@@ -74,6 +75,7 @@ open-runo-gateway = { path = "crates/open-runo-gateway" }
 open-runo-persisted-queries = { path = "crates/open-runo-persisted-queries" }
 open-runo-scim = { path = "crates/open-runo-scim" }
 open-runo-cache = { path = "crates/open-runo-cache" }
+open-runo-api-types = { path = "crates/open-runo-api-types" }
 
 # Quality Gate: workspace-wide lint policy.
 # Individual crates opt in via `[lints] workspace = true`.

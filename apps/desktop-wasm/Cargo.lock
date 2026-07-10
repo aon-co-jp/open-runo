@@ -68,10 +68,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "open-runo-api-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "open-runo-desktop-wasm"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "open-runo-api-types",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

@@ -202,7 +202,12 @@ fn render_schemas() {
                     let lines: Vec<String> = h
                         .versions
                         .iter()
-                        .map(|v| format!("{} {} [{}] {}", v.service_name, v.id, v.stage, v.created_at))
+                        .map(|v| {
+                            format!(
+                                "{} @{} in \"{}\" ({}) at {}",
+                                v.service_name, v.stage, v.namespace, v.id, v.created_at
+                            )
+                        })
                         .collect();
                     set_text("history-list", &lines.join("\n"));
                 }

@@ -10,6 +10,7 @@ use crate::keyring::KeyGuardian;
 use crate::state::AppState;
 use crate::validation::{DB_UPSERT_REQUEST, REGISTER_SCHEMA_REQUEST};
 use hyper::StatusCode;
+use open_runo_api_types::{FederationStatusResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion};
 use open_runo_schema_registry::{Stage, DEFAULT_NAMESPACE};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -43,13 +44,6 @@ fn stage_name(stage: Stage) -> &'static str {
         Stage::Staging => "staging",
         Stage::Production => "production",
     }
-}
-
-#[derive(Serialize)]
-struct FederationStatusResponse {
-    contributing_services: Vec<String>,
-    type_count: usize,
-    field_count: usize,
 }
 
 /// GET /api/federation/status — poem-free port of
@@ -439,16 +433,6 @@ pub fn db_delete_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Ha
     })
 }
 
-#[derive(Serialize)]
-struct SchemaResponse {
-    id: String,
-    namespace: String,
-    service_name: String,
-    sdl: String,
-    stage: String,
-    created_at: String,
-}
-
 /// GET /api/schemas/:service — poem-free port of `handlers::schemas::get_schema`.
 pub fn get_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
     Arc::new(move |req, params| {
@@ -475,7 +459,7 @@ pub fn get_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> H
             match registry.latest_in(namespace, &service, stage) {
                 Some(v) => json_response(
                     StatusCode::OK,
-                    &SchemaResponse {
+                    &SchemaVersion {
                         id: v.id.to_string(),
                         namespace: v.namespace.clone(),
                         service_name: v.service_name.clone(),
@@ -493,11 +477,6 @@ pub fn get_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> H
             }
         })
     })
-}
-
-#[derive(Serialize)]
-struct HistoryResponse {
-    versions: Vec<SchemaResponse>,
 }
 
 /// GET /api/schemas/:service/history — poem-free port of
@@ -525,7 +504,7 @@ pub fn get_schema_history_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
             let versions = registry
                 .history_in(namespace, &service)
                 .iter()
-                .map(|v| SchemaResponse {
+                .map(|v| SchemaVersion {
                     id: v.id.to_string(),
                     namespace: v.namespace.clone(),
                     service_name: v.service_name.clone(),
@@ -535,32 +514,9 @@ pub fn get_schema_history_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
                 })
                 .collect();
 
-            json_response(StatusCode::OK, &HistoryResponse { versions })
+            json_response(StatusCode::OK, &SchemaHistoryResponse { versions })
         })
     })
-}
-
-fn default_stage() -> String {
-    "local".to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct RegisterRequest {
-    service_name: String,
-    sdl: String,
-    #[serde(default = "default_stage")]
-    stage: String,
-    #[serde(default)]
-    namespace: Option<String>,
-}
-
-#[derive(Serialize)]
-struct RegisterResponse {
-    id: String,
-    namespace: String,
-    service_name: String,
-    stage: String,
-    created_at: String,
 }
 
 /// POST /api/schemas — poem-free port of `handlers::schemas::register_schema`.
@@ -592,7 +548,7 @@ pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
                 );
             }
 
-            let body: RegisterRequest = match serde_json::from_value(raw) {
+            let body: RegisterSchemaRequest = match serde_json::from_value(raw) {
                 Ok(b) => b,
                 Err(e) => {
                     return json_response(
@@ -629,10 +585,11 @@ pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
 
             json_response(
                 StatusCode::OK,
-                &RegisterResponse {
+                &SchemaVersion {
                     id: version.id.to_string(),
                     namespace: version.namespace.clone(),
                     service_name: version.service_name.clone(),
+                    sdl: version.sdl.clone(),
                     stage: stage_name(version.stage).to_string(),
                     created_at: version.created_at.to_rfc3339(),
                 },

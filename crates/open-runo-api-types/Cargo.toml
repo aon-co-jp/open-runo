@@ -1,0 +1,18 @@
+[package]
+name = "open-runo-api-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared REST API request/response types for open-runo-router, open-runo-cli, and the WASM frontend -- one source of truth so the wire shape can't silently drift between server and clients (see CLAUDE.md HANDOFF, 2026-07-11)"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
