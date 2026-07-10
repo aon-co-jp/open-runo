@@ -18,7 +18,11 @@ use std::sync::Arc;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env().map_err(|e| format!("config error: {e}"))?;
 
-    open_runo_observability::init_tracing(&config.log_level);
+    open_runo_observability::init_tracing_with_otlp(
+        &config.log_level,
+        config.otlp_endpoint.as_deref(),
+        "open-runo-gateway",
+    );
 
     tracing::info!(
         bind_addr = %config.bind_addr,

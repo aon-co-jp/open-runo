@@ -1,8 +1,9 @@
 //! `open-runo-observability`: standardizes tracing/metrics setup across all
-//! open-runo services. OpenTelemetry/Prometheus/Grafana export is planned
-//! (see README section 9); this crate currently wires up structured
-//! console logging via `tracing-subscriber` and a minimal in-process
-//! counter registry for tests and local development.
+//! open-runo services. This crate wires up structured console logging via
+//! `tracing-subscriber`, an optional OTLP (OpenTelemetry Protocol) trace
+//! exporter for shipping spans to a collector (Jaeger, Tempo, Grafana,
+//! any OTLP-compatible backend), and a minimal in-process counter registry
+//! for tests and local development.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
@@ -10,13 +11,64 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::collections::HashMap;
 
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
 /// Initialize a JSON-structured `tracing` subscriber reading its level
 /// from `log_level` (e.g. `"info"`, `"debug"`). Safe to call once per
-/// process at startup.
+/// process at startup. Console-only; see [`init_tracing_with_otlp`] to
+/// additionally export spans via OTLP.
 pub fn init_tracing(log_level: &str) {
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(log_level.to_string()))
-        .json()
+    init_tracing_with_otlp(log_level, None, "open-runo");
+}
+
+/// Same as [`init_tracing`], but when `otlp_endpoint` is `Some`, additionally
+/// exports spans to that OTLP HTTP endpoint (e.g. `http://localhost:4318`,
+/// the default port an OpenTelemetry Collector or Jaeger/Tempo listens on)
+/// under `service_name`. If building the exporter fails (bad URL, etc.) this
+/// falls back to console-only logging rather than failing startup —
+/// telemetry export is a diagnostic aid, not a hard dependency for the
+/// service to run.
+pub fn init_tracing_with_otlp(log_level: &str, otlp_endpoint: Option<&str>, service_name: &str) {
+    let env_filter = tracing_subscriber::EnvFilter::new(log_level.to_string());
+    let fmt_layer = tracing_subscriber::fmt::layer().json();
+
+    let Some(endpoint) = otlp_endpoint else {
+        let _ = tracing_subscriber::registry().with(env_filter).with(fmt_layer).try_init();
+        return;
+    };
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint)
+        .build();
+
+    let exporter = match exporter {
+        Ok(exporter) => exporter,
+        Err(error) => {
+            let _ = tracing_subscriber::registry().with(env_filter).with(fmt_layer).try_init();
+            tracing::warn!(%error, endpoint, "failed to build OTLP exporter; continuing with console-only tracing");
+            return;
+        }
+    };
+
+    let resource = opentelemetry_sdk::Resource::builder()
+        .with_attribute(opentelemetry::KeyValue::new("service.name", service_name.to_string()))
+        .build();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .build();
+    let tracer = provider.tracer(service_name.to_string());
+    opentelemetry::global::set_tracer_provider(provider);
+
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(otel_layer)
         .try_init();
 }
 
@@ -70,5 +122,17 @@ mod tests {
         // Calling twice must not panic (try_init swallows the second error).
         init_tracing("info");
         init_tracing("debug");
+    }
+
+    #[test]
+    fn init_tracing_with_otlp_falls_back_on_bad_endpoint() {
+        // An unparseable endpoint must not panic the caller; it should log
+        // a warning and fall back to console-only tracing.
+        init_tracing_with_otlp("info", Some("not a valid url"), "test-service");
+    }
+
+    #[test]
+    fn init_tracing_with_otlp_none_is_console_only() {
+        init_tracing_with_otlp("info", None, "test-service");
     }
 }

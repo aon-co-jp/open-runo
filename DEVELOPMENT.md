@@ -46,13 +46,14 @@ By default this starts the Gateway Router on `0.0.0.0:8080` with a
 | `OPEN_RUNO_LOG_LEVEL`                | `info`         | `tracing` filter directive (JSON output via `open-runo-observability`) |
 | `OPEN_RUNO_RATE_LIMIT_MAX_REQUESTS`  | `120`          | Requests allowed per client key per window            |
 | `OPEN_RUNO_RATE_LIMIT_WINDOW_SECS`   | `60`           | Rolling window (seconds) for the rate limit above     |
+| `OPEN_RUNO_OTLP_ENDPOINT`           | unset          | OTLP HTTP endpoint (e.g. `http://localhost:4318`) to export traces to; unset keeps tracing console-only |
 | `DATABASE_URL`                      | unset          | Postgres connection string, only read by `open-runo-db`'s `postgres` feature |
 
 See `.env.example` for a copy-pasteable starting point. `open-runo-router`'s
-binary wires `OPEN_RUNO_LOG_LEVEL` into `open_runo_observability::init_tracing`
-and the two rate-limit variables into a Poem middleware
-(`open_runo_router::rate_limit::RateLimit`) backed by
-`open_runo_security::RateLimiter`, keyed by the `X-Forwarded-For` /
+binary wires `OPEN_RUNO_LOG_LEVEL` (and, when set, `OPEN_RUNO_OTLP_ENDPOINT`)
+into `open_runo_observability::init_tracing_with_otlp`, and the two
+rate-limit variables into `open_runo_router::middleware_hyper::with_rate_limit`
+backed by `open_runo_security::RateLimiter`, keyed by the `X-Forwarded-For` /
 `X-Real-IP` header (falling back to a single shared bucket when neither is
 present).
 
