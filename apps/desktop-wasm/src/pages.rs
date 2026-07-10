@@ -71,7 +71,7 @@ pub fn mount() {
     };
     let _ = content;
 
-    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim", "persisted-queries"] {
+    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim", "persisted-queries", "cache-backup"] {
         let link_id = format!("nav-{page}");
         on_click(&link_id, move || navigate(page));
     }
@@ -103,6 +103,7 @@ fn navigate(page: &str) {
         "db" => render_db(),
         "scim" => render_scim(),
         "persisted-queries" => render_persisted_queries(),
+        "cache-backup" => render_cache_backup(),
         _ => {}
     }
 }
@@ -472,6 +473,89 @@ fn render_persisted_queries() {
             match api::get_persisted_query(&hash).await {
                 Ok(r) => set_text("pq-fetch-result", &format!("query: {}\nregistered_at: {}", r.query, r.registered_at)),
                 Err(e) => set_text("pq-fetch-result", &format!("failed: {e}")),
+            }
+        });
+    });
+}
+
+fn render_cache_backup() {
+    let Some(content) = content_el() else { return };
+    content.set_inner_html(
+        r#"
+        <h2>Cache &amp; Backup</h2>
+        <fieldset>
+          <legend>HTML page cache</legend>
+          <input id="cache-purge-path" placeholder="/page/123" />
+          <button id="cache-purge-btn">Purge one</button>
+          <button id="cache-purge-all-btn">Purge all</button>
+          <button id="cache-stats-btn">AI stats</button>
+          <pre id="cache-result"></pre>
+        </fieldset>
+        <fieldset>
+          <legend>Backup &amp; integrity</legend>
+          <button id="backup-export-btn">Export backup</button>
+          <button id="integrity-check-btn">Run integrity check</button>
+          <pre id="backup-result"></pre>
+        </fieldset>
+        "#,
+    );
+
+    on_click("cache-purge-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let path = input_value("cache-purge-path");
+            set_text("cache-result", "purging…");
+            match api::cache_purge(&path).await {
+                Ok(r) => set_text("cache-result", &format!("purged: {}", r.purged)),
+                Err(e) => set_text("cache-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("cache-purge-all-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("cache-result", "purging all…");
+            match api::cache_purge_all().await {
+                Ok(r) => set_text("cache-result", &format!("purged: {}", r.purged)),
+                Err(e) => set_text("cache-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("cache-stats-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("cache-result", "loading…");
+            match api::cache_ai_stats().await {
+                Ok(s) => set_text(
+                    "cache-result",
+                    &format!(
+                        "ai_enabled={} hits={} misses={} hit_ratio={:.2} tracked_keys={}",
+                        s.ai_enabled, s.cache_hits, s.cache_misses, s.hit_ratio, s.tracked_keys
+                    ),
+                ),
+                Err(e) => set_text("cache-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("backup-export-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("backup-result", "exporting…");
+            match api::backup_export().await {
+                Ok(r) => set_text(
+                    "backup-result",
+                    &format!("records={}\nwritten:\n{}", r.records, r.written.join("\n")),
+                ),
+                Err(e) => set_text("backup-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("integrity-check-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("backup-result", "checking…");
+            match api::integrity_check().await {
+                Ok(r) => set_text("backup-result", &format!("backend={} healed={}", r.backend, r.healed)),
+                Err(e) => set_text("backup-result", &format!("failed: {e}")),
             }
         });
     });

@@ -276,3 +276,54 @@ pub async fn register_persisted_query(query: &str) -> Result<PqRegisterResponse,
 pub async fn get_persisted_query(hash: &str) -> Result<PqQueryResponse, String> {
     get_json(&format!("/api/persisted-queries/{hash}")).await
 }
+
+#[derive(Debug, Serialize)]
+struct PurgeRequest<'a> {
+    path: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PurgeResponse {
+    pub purged: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AiStatsResponse {
+    pub ai_enabled: bool,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub hit_ratio: f64,
+    pub tracked_keys: usize,
+}
+
+pub async fn cache_purge(path: &str) -> Result<PurgeResponse, String> {
+    post_json("/api/cache/purge", &PurgeRequest { path }).await
+}
+
+pub async fn cache_purge_all() -> Result<PurgeResponse, String> {
+    post_json("/api/cache/purge-all", &serde_json::json!({})).await
+}
+
+pub async fn cache_ai_stats() -> Result<AiStatsResponse, String> {
+    get_json("/api/cache/ai-stats").await
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportResponse {
+    pub written: Vec<String>,
+    pub records: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IntegrityResponse {
+    pub backend: String,
+    pub healed: usize,
+}
+
+pub async fn backup_export() -> Result<ExportResponse, String> {
+    post_json("/api/backup/export", &serde_json::json!({})).await
+}
+
+pub async fn integrity_check() -> Result<IntegrityResponse, String> {
+    post_json("/api/integrity/check", &serde_json::json!({})).await
+}
