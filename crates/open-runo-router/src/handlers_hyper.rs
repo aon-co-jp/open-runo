@@ -354,6 +354,111 @@ pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
     })
 }
 
+fn parse_provider(s: &str) -> open_runo_ai_routing::Provider {
+    use open_runo_ai_routing::Provider;
+    match s.to_lowercase().replace('-', "_").as_str() {
+        "openai" => Provider::OpenAi,
+        "anthropic" | "anthropic_claude" => Provider::AnthropicClaude,
+        "google" | "google_gemini" | "gemini" => Provider::GoogleGemini,
+        "deepseek" => Provider::DeepSeek,
+        "local" | "local_llm" => Provider::LocalLlm,
+        _ => Provider::CustomOpenAiCompatible,
+    }
+}
+
+fn parse_policy(s: &str) -> open_runo_ai_routing::RoutingPolicy {
+    use open_runo_ai_routing::RoutingPolicy;
+    match s.to_lowercase().as_str() {
+        "latency" | "latency_optimized" => RoutingPolicy::LatencyOptimized,
+        "local" | "local_first" => RoutingPolicy::LocalFirst,
+        "privacy" | "privacy_first" => RoutingPolicy::PrivacyFirst,
+        _ => RoutingPolicy::CostOptimized,
+    }
+}
+
+fn provider_name(p: &open_runo_ai_routing::Provider) -> &'static str {
+    use open_runo_ai_routing::Provider;
+    match p {
+        Provider::OpenAi => "openai",
+        Provider::AnthropicClaude => "anthropic_claude",
+        Provider::GoogleGemini => "google_gemini",
+        Provider::DeepSeek => "deepseek",
+        Provider::LocalLlm => "local_llm",
+        Provider::CustomOpenAiCompatible => "custom_openai_compatible",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CandidateInput {
+    provider: String,
+    estimated_cost_usd_per_1k_tokens: f64,
+    estimated_latency_ms: u32,
+    is_local: bool,
+    context_length: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct RouteRequest {
+    policy: String,
+    min_context_length: Option<u32>,
+    candidates: Vec<CandidateInput>,
+}
+
+#[derive(Serialize)]
+struct RouteResponse {
+    selected_provider: String,
+    is_local: bool,
+    estimated_cost_usd_per_1k_tokens: f64,
+    estimated_latency_ms: u32,
+}
+
+/// POST /api/ai/route — poem-free port of `handlers::ai_routing::route_request`.
+pub fn route_request_handler(guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let body: RouteRequest = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let candidates: Vec<open_runo_ai_routing::Candidate> = body
+                .candidates
+                .iter()
+                .map(|c| open_runo_ai_routing::Candidate {
+                    provider: parse_provider(&c.provider),
+                    estimated_cost_usd_per_1k_tokens: c.estimated_cost_usd_per_1k_tokens,
+                    estimated_latency_ms: c.estimated_latency_ms,
+                    is_local: c.is_local,
+                    context_length: c.context_length,
+                })
+                .collect();
+
+            let policy = parse_policy(&body.policy);
+            let min_ctx = body.min_context_length.unwrap_or(0);
+
+            match open_runo_ai_routing::route(&candidates, policy, min_ctx) {
+                Ok(chosen) => json_response(
+                    StatusCode::OK,
+                    &RouteResponse {
+                        selected_provider: provider_name(&chosen.provider).to_string(),
+                        is_local: chosen.is_local,
+                        estimated_cost_usd_per_1k_tokens: chosen.estimated_cost_usd_per_1k_tokens,
+                        estimated_latency_ms: chosen.estimated_latency_ms,
+                    },
+                ),
+                Err(e) => json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +791,64 @@ mod tests {
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/api/schemas"))
             .json(&serde_json::json!({ "service_name": "users", "sdl": "type User { id: ID! }" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ai_route_returns_best_provider() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(Method::POST, "/api/ai/route", route_request_handler(guardian));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/ai/route"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({
+                "policy": "cost",
+                "min_context_length": 4000,
+                "candidates": [
+                    {
+                        "provider": "local_llm",
+                        "estimated_cost_usd_per_1k_tokens": 0.0,
+                        "estimated_latency_ms": 900,
+                        "is_local": true,
+                        "context_length": 8000
+                    },
+                    {
+                        "provider": "anthropic",
+                        "estimated_cost_usd_per_1k_tokens": 3.0,
+                        "estimated_latency_ms": 400,
+                        "is_local": false,
+                        "context_length": 200000
+                    }
+                ]
+            }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["selected_provider"], "local_llm");
+    }
+
+    #[tokio::test]
+    async fn ai_route_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(Method::POST, "/api/ai/route", route_request_handler(guardian));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/ai/route"))
+            .json(&serde_json::json!({ "policy": "cost", "candidates": [] }))
             .send()
             .await
             .expect("request should succeed");
