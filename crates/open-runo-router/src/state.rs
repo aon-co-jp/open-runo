@@ -8,6 +8,7 @@
 
 use open_runo_db::{DbBackend, InMemoryBackend};
 use open_runo_federation::ComposedSchema;
+use open_runo_feature_flags::FeatureFlagRegistry;
 use open_runo_history::History;
 use open_runo_schema_registry::SchemaRegistry;
 use std::sync::{Arc, Mutex};
@@ -35,6 +36,11 @@ pub struct AppState {
     pub db: Arc<dyn DbBackend>,
     /// In-process event broker for realtime consumers (GraphQL Subscriptions).
     pub events: broadcast::Sender<SchemaEvent>,
+    /// Feature flags: canary releases / percentage-based traffic routing
+    /// (Cosmo Feature Flags parity, `docs/cosmo-parity.md` 4a). In-memory,
+    /// like `schema_registry` -- flag definitions are operational config,
+    /// not durable application data.
+    pub feature_flags: Arc<Mutex<FeatureFlagRegistry>>,
 }
 
 impl AppState {
@@ -46,6 +52,7 @@ impl AppState {
             history: Arc::new(Mutex::new(History::new())),
             db: Arc::new(InMemoryBackend::new()),
             events: broadcast::channel(EVENT_CAPACITY).0,
+            feature_flags: Arc::new(Mutex::new(FeatureFlagRegistry::new())),
         }
     }
 
@@ -57,6 +64,7 @@ impl AppState {
             history: Arc::new(Mutex::new(History::new())),
             db,
             events: broadcast::channel(EVENT_CAPACITY).0,
+            feature_flags: Arc::new(Mutex::new(FeatureFlagRegistry::new())),
         }
     }
 

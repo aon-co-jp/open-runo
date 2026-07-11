@@ -8,9 +8,13 @@ use crate::auth_hyper::check_api_key;
 use crate::hyper_compat::{empty_status, json_response, query_params, read_json_body, sse_response, Handler, SseEvent};
 use crate::keyring::KeyGuardian;
 use crate::state::AppState;
-use crate::validation::{DB_UPSERT_REQUEST, REGISTER_SCHEMA_REQUEST};
+use crate::validation::{DB_UPSERT_REQUEST, FEATURE_FLAG_REQUEST, REGISTER_SCHEMA_REQUEST};
 use hyper::StatusCode;
-use open_runo_api_types::{FederationStatusResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion};
+use open_runo_api_types::{
+    FederationStatusResponse, FeatureFlagEvaluationResponse, FeatureFlagListResponse, FeatureFlagRequest,
+    FeatureFlagResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
+};
+use open_runo_feature_flags::FeatureFlag;
 use open_runo_schema_registry::{Stage, DEFAULT_NAMESPACE};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -1677,6 +1681,196 @@ pub fn self_issue_key_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) 
 
 const SELF_ISSUE_KEY_TTL_HOURS: i64 = 24;
 
+fn to_flag_response(flag: &FeatureFlag) -> FeatureFlagResponse {
+    FeatureFlagResponse {
+        name: flag.name.clone(),
+        enabled: flag.enabled,
+        rollout_percent: flag.rollout_percent,
+        description: flag.description.clone(),
+    }
+}
+
+/// POST /api/feature-flags — create-or-update a feature flag (Cosmo
+/// Feature Flags parity: canary releases / percentage-based traffic
+/// routing, see `docs/cosmo-parity.md` 4a and
+/// `open_runo_feature_flags::FeatureFlagRegistry`).
+pub fn feature_flag_upsert_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+
+            let raw: serde_json::Value = match read_json_body(req).await {
+                Ok(v) => v,
+                Err(resp) => return resp,
+            };
+
+            let errors: Vec<String> = FEATURE_FLAG_REQUEST
+                .iter_errors(&raw)
+                .map(|e| format!("{} (at {})", e, e.instance_path))
+                .collect();
+            if !errors.is_empty() {
+                return json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({
+                        "error": format!("request body failed validation: {}", errors.join("; "))
+                    }),
+                );
+            }
+
+            let body: FeatureFlagRequest = match serde_json::from_value(raw) {
+                Ok(b) => b,
+                Err(e) => {
+                    return json_response(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        &serde_json::json!({ "error": format!("deserialize body: {e}") }),
+                    )
+                }
+            };
+
+            let flag = FeatureFlag::new(body.name)
+                .enabled(body.enabled)
+                .rollout_percent(body.rollout_percent)
+                .description(body.description);
+
+            // The mutex guard is a temporary here (not bound to a variable),
+            // so it drops at the end of this statement -- before the `.await`
+            // below -- keeping the returned future `Send` (see db/schema
+            // handlers above for the same pattern).
+            let result = state
+                .feature_flags
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .upsert(flag);
+
+            match result {
+                Ok(saved) => {
+                    crate::audit::record(&state, &actor, "feature_flag.upsert", saved.name.clone()).await;
+                    json_response(StatusCode::OK, &to_flag_response(&saved))
+                }
+                Err(e) => json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({ "error": e.to_string() }),
+                ),
+            }
+        })
+    })
+}
+
+/// GET /api/feature-flags — list every registered flag, sorted by name.
+pub fn feature_flag_list_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let registry = state
+                .feature_flags
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let flags = registry.list().iter().map(|f| to_flag_response(f)).collect();
+            json_response(StatusCode::OK, &FeatureFlagListResponse { flags })
+        })
+    })
+}
+
+/// GET /api/feature-flags/:name — fetch a single flag definition.
+pub fn feature_flag_get_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let name = params.get("name").unwrap_or("").to_string();
+            let registry = state
+                .feature_flags
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match registry.get(&name) {
+                Some(flag) => json_response(StatusCode::OK, &to_flag_response(flag)),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("feature flag not found: {name}") }),
+                ),
+            }
+        })
+    })
+}
+
+/// DELETE /api/feature-flags/:name — remove a flag definition.
+pub fn feature_flag_delete_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
+            let name = params.get("name").unwrap_or("").to_string();
+
+            let existed = {
+                let mut registry = state
+                    .feature_flags
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                registry.delete(&name)
+            };
+
+            if !existed {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("feature flag not found: {name}") }),
+                );
+            }
+
+            crate::audit::record(&state, &actor, "feature_flag.delete", name.clone()).await;
+            json_response(StatusCode::OK, &serde_json::json!({ "name": name, "deleted": true }))
+        })
+    })
+}
+
+/// GET /api/feature-flags/:name/evaluate?bucket_key=... — deterministically
+/// evaluate a flag for a caller (typically a user id, session id, or API
+/// key). 404 if the flag itself is unknown (distinct from "off").
+pub fn feature_flag_evaluate_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let name = params.get("name").unwrap_or("").to_string();
+            let query = query_params(&req);
+            let bucket_key = query.get("bucket_key").cloned().unwrap_or_default();
+
+            let registry = state
+                .feature_flags
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match registry.evaluate(&name, &bucket_key) {
+                Some(enabled) => json_response(
+                    StatusCode::OK,
+                    &FeatureFlagEvaluationResponse { name, bucket_key, enabled },
+                ),
+                None => json_response(
+                    StatusCode::NOT_FOUND,
+                    &serde_json::json!({ "error": format!("feature flag not found: {name}") }),
+                ),
+            }
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2745,5 +2939,222 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    fn feature_flags_router(state: &Arc<AppState>, guardian: Arc<KeyGuardian>) -> Router {
+        Router::new()
+            .route(
+                Method::POST,
+                "/api/feature-flags",
+                feature_flag_upsert_handler(Arc::clone(state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/feature-flags",
+                feature_flag_list_handler(Arc::clone(state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/feature-flags/:name",
+                feature_flag_get_handler(Arc::clone(state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::DELETE,
+                "/api/feature-flags/:name",
+                feature_flag_delete_handler(Arc::clone(state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/feature-flags/:name/evaluate",
+                feature_flag_evaluate_handler(Arc::clone(state), guardian),
+            )
+    }
+
+    #[tokio::test]
+    async fn feature_flag_upsert_and_get_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/feature-flags"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "name": "new-checkout", "rollout_percent": 25, "description": "canary" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["name"], "new-checkout");
+        assert_eq!(body["rollout_percent"], 25);
+        assert_eq!(body["enabled"], true);
+
+        let resp = client
+            .get(format!("http://{addr}/api/feature-flags/new-checkout"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["description"], "canary");
+    }
+
+    #[tokio::test]
+    async fn feature_flag_upsert_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/feature-flags"))
+            .json(&serde_json::json!({ "name": "f" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn feature_flag_get_unknown_is_404() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/feature-flags/ghost"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn feature_flag_list_reflects_upserts() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        for name in ["zeta", "alpha"] {
+            let resp = client
+                .post(format!("http://{addr}/api/feature-flags"))
+                .header("x-api-key", "test-key")
+                .json(&serde_json::json!({ "name": name }))
+                .send()
+                .await
+                .expect("request should succeed");
+            assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        }
+
+        let resp = client
+            .get(format!("http://{addr}/api/feature-flags"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let names: Vec<&str> = body["flags"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[tokio::test]
+    async fn feature_flag_evaluate_unknown_flag_is_404() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/api/feature-flags/ghost/evaluate?bucket_key=user-1"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn feature_flag_evaluate_full_rollout_is_true_for_any_bucket_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/feature-flags"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "name": "always-on", "rollout_percent": 100 }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .get(format!("http://{addr}/api/feature-flags/always-on/evaluate?bucket_key=whoever"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["enabled"], true);
+        assert_eq!(body["bucket_key"], "whoever");
+    }
+
+    #[tokio::test]
+    async fn feature_flag_delete_then_get_is_404() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = feature_flags_router(&state, guardian);
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .post(format!("http://{addr}/api/feature-flags"))
+            .header("x-api-key", "test-key")
+            .json(&serde_json::json!({ "name": "temp" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .delete(format!("http://{addr}/api/feature-flags/temp"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .get(format!("http://{addr}/api/feature-flags/temp"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
     }
 }

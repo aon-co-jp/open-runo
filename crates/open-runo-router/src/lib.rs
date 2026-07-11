@@ -253,6 +253,31 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
             "/api/events",
             wrap(handlers_hyper::stream_events_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
+        .route(
+            Method::POST,
+            "/api/feature-flags",
+            wrap(handlers_hyper::feature_flag_upsert_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::GET,
+            "/api/feature-flags",
+            wrap(handlers_hyper::feature_flag_list_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::GET,
+            "/api/feature-flags/:name",
+            wrap(handlers_hyper::feature_flag_get_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::DELETE,
+            "/api/feature-flags/:name",
+            wrap(handlers_hyper::feature_flag_delete_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::GET,
+            "/api/feature-flags/:name/evaluate",
+            wrap(handlers_hyper::feature_flag_evaluate_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
         // ── WASM frontend bundle (apps/desktop-wasm/www) ─────────────────
         // Directory is configurable via OPEN_RUNO_STATIC_DIR so the
         // binary can be run from any working directory; defaults to the

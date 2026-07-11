@@ -83,6 +83,52 @@ pub struct RateLimitedResponse {
     pub retry_after_secs: i64,
 }
 
+/// Request body for `POST /api/feature-flags` (create-or-update, upsert
+/// semantics keyed by `name`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeatureFlagRequest {
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_full_rollout")]
+    pub rollout_percent: u8,
+    #[serde(default)]
+    pub description: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_full_rollout() -> u8 {
+    100
+}
+
+/// A feature flag as returned by `POST /api/feature-flags`,
+/// `GET /api/feature-flags/:name`, and (as `FeatureFlagListResponse::flags`)
+/// `GET /api/feature-flags`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct FeatureFlagResponse {
+    pub name: String,
+    pub enabled: bool,
+    pub rollout_percent: u8,
+    pub description: String,
+}
+
+/// Response body for `GET /api/feature-flags`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeatureFlagListResponse {
+    pub flags: Vec<FeatureFlagResponse>,
+}
+
+/// Response body for `GET /api/feature-flags/:name/evaluate`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FeatureFlagEvaluationResponse {
+    pub name: String,
+    pub bucket_key: String,
+    pub enabled: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -125,4 +171,45 @@ mod tests {
         assert_eq!(back.retry_after_secs, 42);
     }
 
+    #[test]
+    fn feature_flag_request_defaults_enabled_and_rollout_and_description() {
+        let req: FeatureFlagRequest = serde_json::from_str(r#"{"name": "new-checkout"}"#).unwrap();
+        assert!(req.enabled);
+        assert_eq!(req.rollout_percent, 100);
+        assert_eq!(req.description, "");
+    }
+
+    #[test]
+    fn feature_flag_response_roundtrips_through_json() {
+        let f = FeatureFlagResponse {
+            name: "new-checkout".to_string(),
+            enabled: true,
+            rollout_percent: 25,
+            description: "canary".to_string(),
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: FeatureFlagResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+    }
+
+    #[test]
+    fn feature_flag_list_response_wraps_flags() {
+        let json = r#"{"flags": []}"#;
+        let resp: FeatureFlagListResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.flags.is_empty());
+    }
+
+    #[test]
+    fn feature_flag_evaluation_response_roundtrips_through_json() {
+        let r = FeatureFlagEvaluationResponse {
+            name: "new-checkout".to_string(),
+            bucket_key: "user-42".to_string(),
+            enabled: true,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        let back: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(back["name"], "new-checkout");
+        assert_eq!(back["bucket_key"], "user-42");
+        assert_eq!(back["enabled"], true);
+    }
 }

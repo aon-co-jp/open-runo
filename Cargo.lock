@@ -3491,6 +3491,7 @@ dependencies = [
  "open-runo-cache",
  "open-runo-core",
  "open-runo-db",
+ "open-runo-feature-flags",
  "open-runo-federation",
  "open-runo-history",
  "open-runo-observability",

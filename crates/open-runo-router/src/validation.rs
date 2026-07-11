@@ -38,6 +38,20 @@ pub static DB_UPSERT_REQUEST: Lazy<Validator> = Lazy::new(|| {
     }))
 });
 
+/// Schema for `POST /api/feature-flags` request bodies.
+pub static FEATURE_FLAG_REQUEST: Lazy<Validator> = Lazy::new(|| {
+    compile(serde_json::json!({
+        "type": "object",
+        "required": ["name"],
+        "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "enabled": { "type": "boolean" },
+            "rollout_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+            "description": { "type": "string" }
+        }
+    }))
+});
+
 /// Validate `body` against `validator`, returning a readable list of
 /// violations (joined with `; `) when it fails. Poem-free: callers turn
 /// the `Err` string into whatever response type they need (hyper_compat
@@ -82,5 +96,16 @@ mod tests {
     fn db_upsert_request_requires_value_field() {
         assert!(validate(&DB_UPSERT_REQUEST, &json!({})).is_err());
         assert!(validate(&DB_UPSERT_REQUEST, &json!({ "value": 42 })).is_ok());
+    }
+
+    #[test]
+    fn feature_flag_request_requires_name() {
+        assert!(validate(&FEATURE_FLAG_REQUEST, &json!({})).is_err());
+        assert!(validate(&FEATURE_FLAG_REQUEST, &json!({ "name": "f" })).is_ok());
+    }
+
+    #[test]
+    fn feature_flag_request_rejects_rollout_percent_over_100() {
+        assert!(validate(&FEATURE_FLAG_REQUEST, &json!({ "name": "f", "rollout_percent": 101 })).is_err());
     }
 }
