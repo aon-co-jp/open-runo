@@ -1588,6 +1588,60 @@ pub fn stream_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -
     })
 }
 
+/// `GET /api/ws-echo` — the minimum-viable proof of the generic
+/// `hyper_compat::websocket_handler` primitive: echoes back every text or
+/// binary frame it receives, unchanged, until the client closes.
+pub fn ws_echo_handler() -> Handler {
+    crate::hyper_compat::websocket_handler(|mut conn| {
+        Box::pin(async move {
+            while let Some(msg) = conn.recv().await {
+                let result = match &msg {
+                    crate::hyper_compat::WsMessage::Text(text) => conn.send_text(text).await,
+                    crate::hyper_compat::WsMessage::Binary(data) => conn.send_binary(data).await,
+                };
+                if result.is_err() {
+                    break;
+                }
+            }
+        })
+    })
+}
+
+/// `GET /api/ws-events` — a second, more substantive WebSocket route:
+/// the same `state.events` broadcast broker already consumed by
+/// `stream_events_handler` (SSE) and the poem-based GraphQL Subscriptions
+/// path, now also exposed as a plain WebSocket alternative. Purely
+/// additive: neither of those other two consumers is touched.
+pub fn ws_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    let inner = crate::hyper_compat::websocket_handler(move |mut conn| {
+        let mut rx = state.events.subscribe();
+        Box::pin(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        let payload = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+                        if conn.send_text(&payload).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    });
+    Arc::new(move |req, params| {
+        let guardian = Arc::clone(&guardian);
+        let inner = Arc::clone(&inner);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            inner(req, params).await
+        })
+    })
+}
+
 #[derive(Serialize)]
 struct SelfIssueResponse {
     api_key: String,
@@ -3108,5 +3162,68 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    /// Real end-to-end WebSocket round trip: a real TCP listener + real
+    /// hyper HTTP/1.1 connection with `.with_upgrades()`, and a real
+    /// WebSocket client (`tokio-tungstenite`, test-only -- the server side
+    /// is entirely hand-rolled in `hyper_compat`). Connects, does the RFC
+    /// 6455 handshake, sends a text frame and a binary frame, asserts the
+    /// echo comes back unchanged for each, then closes cleanly.
+    #[tokio::test]
+    async fn websocket_echo_round_trip_over_real_tcp() {
+        use futures::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let router = Router::new().route(Method::GET, "/api/ws-echo", ws_echo_handler());
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let (mut ws, response) = tokio_tungstenite::connect_async(format!("ws://{addr}/api/ws-echo"))
+            .await
+            .expect("client should complete the WebSocket handshake");
+        assert_eq!(response.status(), 101);
+
+        ws.send(Message::Text("hello websocket".into())).await.expect("send text");
+        let reply = ws.next().await.expect("a reply frame").expect("valid frame");
+        assert_eq!(reply, Message::Text("hello websocket".into()));
+
+        ws.send(Message::Binary(vec![1, 2, 3, 4])).await.expect("send binary");
+        let reply = ws.next().await.expect("a reply frame").expect("valid frame");
+        assert_eq!(reply, Message::Binary(vec![1, 2, 3, 4]));
+
+        ws.close(None).await.expect("close should send cleanly");
+    }
+
+    /// `/api/ws-events` requires the same `X-Api-Key` auth as every other
+    /// protected route -- verified by hand-crafting the raw HTTP/1.1
+    /// upgrade request (no `X-Api-Key` header) and asserting a plain `401`
+    /// rather than a `101 Switching Protocols`.
+    #[tokio::test]
+    async fn ws_events_rejects_missing_api_key() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpStream;
+
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(Method::GET, "/api/ws-events", ws_events_handler(state, guardian));
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let request = "GET /api/ws-events HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             Sec-WebSocket-Version: 13\r\n\r\n";
+        stream.write_all(request.as_bytes()).await.expect("write request");
+
+        let mut buf = vec![0u8; 256];
+        let n = stream.read(&mut buf).await.expect("read response");
+        let response = String::from_utf8_lossy(&buf[..n]);
+        assert!(response.starts_with("HTTP/1.1 401"), "expected 401, got: {response}");
     }
 }

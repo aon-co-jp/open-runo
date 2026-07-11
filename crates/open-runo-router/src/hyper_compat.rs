@@ -116,6 +116,299 @@ where
         .expect("building a response from a fixed set of valid headers cannot fail")
 }
 
+// ── Generic WebSocket support (RFC 6455) ─────────────────────────────────
+//
+// Poem-free equivalent of `poem::web::websocket::WebSocket`. Hand-rolled
+// from scratch (no WebSocket-framework crate) on top of hyper's raw
+// `Request::extensions()` / `hyper::upgrade::on` mechanism -- the same
+// primitive real Poem itself is built on. The only crate used here is
+// `sha1` (a narrow, single-purpose hash primitive with the same shape as
+// the already-approved `sha2`/`hex`/`jsonwebtoken`), for the
+// `Sec-WebSocket-Accept` handshake hash; frame parsing/writing and base64
+// encoding are hand-written below.
+//
+// This is deliberately additive: it does not touch the poem-based
+// GraphQL Subscriptions path in `open-runo-gateway`'s `graphql_route`
+// (which keeps using `async-graphql-poem`), nor the SSE transport above.
+
+use hyper::upgrade::Upgraded;
+use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// The fixed GUID from RFC 6455 §1.3, concatenated with the client's
+/// `Sec-WebSocket-Key` before hashing to produce `Sec-WebSocket-Accept`.
+const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/// Minimal base64 (standard alphabet, padded) encoder -- RFC 6455 requires
+/// `Sec-WebSocket-Accept` to be base64, and pulling in a whole `base64`
+/// crate for one 20-byte SHA-1 digest isn't worth a new dependency.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied();
+        let b2 = chunk.get(2).copied();
+        out.push(ALPHABET[(b0 >> 2) as usize] as char);
+        out.push(ALPHABET[(((b0 & 0x03) << 4) | (b1.unwrap_or(0) >> 4)) as usize] as char);
+        if let Some(b1) = b1 {
+            out.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2.unwrap_or(0) >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if let Some(b2) = b2 {
+            out.push(ALPHABET[(b2 & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+/// Compute `Sec-WebSocket-Accept` from the client's `Sec-WebSocket-Key`.
+fn accept_key(client_key: &str) -> String {
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(client_key.as_bytes());
+    hasher.update(WS_GUID.as_bytes());
+    base64_encode(&hasher.finalize())
+}
+
+/// Validate the RFC 6455 upgrade request headers and, if valid, return the
+/// computed `Sec-WebSocket-Accept` value.
+fn validate_upgrade_request(req: &Request) -> Option<String> {
+    let headers = req.headers();
+    let header_has_token = |name: &str, token: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').any(|part| part.trim().eq_ignore_ascii_case(token)))
+            .unwrap_or(false)
+    };
+
+    if !header_has_token("upgrade", "websocket") {
+        return None;
+    }
+    if !header_has_token("connection", "upgrade") {
+        return None;
+    }
+    let version_ok = headers
+        .get("sec-websocket-version")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim() == "13")
+        .unwrap_or(false);
+    if !version_ok {
+        return None;
+    }
+    let key = headers.get("sec-websocket-key")?.to_str().ok()?;
+    Some(accept_key(key))
+}
+
+/// One decoded WebSocket message (fragmentation is transparently
+/// reassembled by [`WebSocketConnection::recv`]; control frames like
+/// ping/pong/close are handled internally and never surfaced here).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WsMessage {
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+const OP_CONTINUATION: u8 = 0x0;
+const OP_TEXT: u8 = 0x1;
+const OP_BINARY: u8 = 0x2;
+const OP_CLOSE: u8 = 0x8;
+const OP_PING: u8 = 0x9;
+const OP_PONG: u8 = 0xA;
+
+struct RawFrame {
+    fin: bool,
+    opcode: u8,
+    payload: Vec<u8>,
+}
+
+/// Read one raw frame off the wire, unmasking client→server payloads per
+/// RFC 6455 §5.2/§5.3. Returns `None` on clean EOF.
+async fn read_frame<R: AsyncReadExt + Unpin>(io: &mut R) -> std::io::Result<Option<RawFrame>> {
+    let mut head = [0u8; 2];
+    if io.read_exact(&mut head).await.is_err() {
+        return Ok(None);
+    }
+    let fin = head[0] & 0x80 != 0;
+    let opcode = head[0] & 0x0f;
+    let masked = head[1] & 0x80 != 0;
+    let mut len = (head[1] & 0x7f) as u64;
+
+    if len == 126 {
+        let mut ext = [0u8; 2];
+        io.read_exact(&mut ext).await?;
+        len = u16::from_be_bytes(ext) as u64;
+    } else if len == 127 {
+        let mut ext = [0u8; 8];
+        io.read_exact(&mut ext).await?;
+        len = u64::from_be_bytes(ext);
+    }
+
+    let mask = if masked {
+        let mut m = [0u8; 4];
+        io.read_exact(&mut m).await?;
+        Some(m)
+    } else {
+        None
+    };
+
+    let mut payload = vec![0u8; len as usize];
+    if len > 0 {
+        io.read_exact(&mut payload).await?;
+    }
+    if let Some(mask) = mask {
+        for (i, byte) in payload.iter_mut().enumerate() {
+            *byte ^= mask[i % 4];
+        }
+    }
+
+    Ok(Some(RawFrame { fin, opcode, payload }))
+}
+
+/// Write one raw, unmasked frame (server→client frames must never be
+/// masked per RFC 6455 §5.1).
+async fn write_frame<W: AsyncWriteExt + Unpin>(
+    io: &mut W,
+    opcode: u8,
+    payload: &[u8],
+) -> std::io::Result<()> {
+    let mut buf = Vec::with_capacity(payload.len() + 10);
+    buf.push(0x80 | opcode); // FIN=1, no fragmentation on the server side.
+    let len = payload.len();
+    if len < 126 {
+        buf.push(len as u8);
+    } else if len <= u16::MAX as usize {
+        buf.push(126);
+        buf.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+        buf.push(127);
+        buf.extend_from_slice(&(len as u64).to_be_bytes());
+    }
+    buf.extend_from_slice(payload);
+    io.write_all(&buf).await?;
+    io.flush().await
+}
+
+/// A live, upgraded WebSocket connection handed to a handler's callback.
+/// Poem-free equivalent of Poem's `WebSocketStream` -- basic send/receive
+/// of text/binary frames, with ping/pong/close handled transparently.
+pub struct WebSocketConnection {
+    io: TokioIo<Upgraded>,
+}
+
+impl WebSocketConnection {
+    /// Receive the next application message (`Text`/`Binary`), transparently
+    /// answering `Ping` with `Pong` and swallowing unsolicited `Pong`.
+    /// Returns `None` once the peer sends `Close` or the connection drops;
+    /// a `Close` frame is echoed back before returning, per RFC 6455 §5.5.1.
+    pub async fn recv(&mut self) -> Option<WsMessage> {
+        let mut fragments: Vec<u8> = Vec::new();
+        let mut fragment_opcode = OP_CONTINUATION;
+        loop {
+            let frame = match read_frame(&mut self.io).await {
+                Ok(Some(f)) => f,
+                _ => return None,
+            };
+            match frame.opcode {
+                OP_PING => {
+                    let _ = write_frame(&mut self.io, OP_PONG, &frame.payload).await;
+                    continue;
+                }
+                OP_PONG => continue,
+                OP_CLOSE => {
+                    let _ = write_frame(&mut self.io, OP_CLOSE, &frame.payload).await;
+                    return None;
+                }
+                OP_TEXT | OP_BINARY => {
+                    fragment_opcode = frame.opcode;
+                    fragments = frame.payload;
+                }
+                OP_CONTINUATION => {
+                    fragments.extend_from_slice(&frame.payload);
+                }
+                _ => continue, // unknown opcode: ignore rather than tear down.
+            }
+            if frame.fin {
+                return match fragment_opcode {
+                    OP_TEXT => Some(WsMessage::Text(String::from_utf8_lossy(&fragments).into_owned())),
+                    OP_BINARY => Some(WsMessage::Binary(fragments)),
+                    _ => continue,
+                };
+            }
+        }
+    }
+
+    pub async fn send_text(&mut self, text: impl AsRef<str>) -> std::io::Result<()> {
+        write_frame(&mut self.io, OP_TEXT, text.as_ref().as_bytes()).await
+    }
+
+    pub async fn send_binary(&mut self, data: &[u8]) -> std::io::Result<()> {
+        write_frame(&mut self.io, OP_BINARY, data).await
+    }
+
+    /// Send a `Close` frame. The peer's own `Close` reply (if any) is
+    /// consumed by whichever side calls `recv()` next.
+    pub async fn close(&mut self) -> std::io::Result<()> {
+        write_frame(&mut self.io, OP_CLOSE, &[]).await
+    }
+}
+
+/// Build a [`Handler`] that performs the RFC 6455 handshake and, on
+/// success, hands the caller-supplied closure a live [`WebSocketConnection`]
+/// once the underlying TCP connection has actually been upgraded. Poem-free
+/// equivalent of Poem's `WebSocket` extractor + `.on_upgrade(...)`.
+///
+/// Requests that fail handshake validation (missing/incorrect
+/// `Upgrade`/`Connection`/`Sec-WebSocket-Key`/`Sec-WebSocket-Version`
+/// headers) get a plain `400 Bad Request` and the closure is never called.
+pub fn websocket_handler<F>(f: F) -> Handler
+where
+    F: Fn(WebSocketConnection) -> BoxFuture<()> + Send + Sync + 'static,
+{
+    let f = Arc::new(f);
+    Arc::new(move |mut req: Request, _params: Params| {
+        let f = Arc::clone(&f);
+        Box::pin(async move {
+            let Some(accept) = validate_upgrade_request(&req) else {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &serde_json::json!({ "error": "invalid WebSocket upgrade request" }),
+                );
+            };
+
+            // `hyper::upgrade::on` must be called on the *server-observed*
+            // request before the response is returned; the returned future
+            // only resolves after this handler's response has actually been
+            // flushed back to the client, so it's spawned as its own task
+            // rather than awaited inline here.
+            let upgrade_fut = hyper::upgrade::on(&mut req);
+            tokio::spawn(async move {
+                match upgrade_fut.await {
+                    Ok(upgraded) => {
+                        let conn = WebSocketConnection { io: TokioIo::new(upgraded) };
+                        f(conn).await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "WebSocket upgrade failed");
+                    }
+                }
+            });
+
+            HyperResponse::builder()
+                .status(StatusCode::SWITCHING_PROTOCOLS)
+                .header("upgrade", "websocket")
+                .header("connection", "Upgrade")
+                .header("sec-websocket-accept", accept)
+                .body(fixed_body(Bytes::new()))
+                .expect("building a response from a fixed set of valid headers cannot fail")
+        })
+    })
+}
+
 /// Parse the request's `?a=1&b=2` query string into a lookup map. Minimal
 /// percent-decoding (`%XX`, `+` → space) — no external query-string crate
 /// needed at this scale.
@@ -252,7 +545,15 @@ pub async fn serve(router: Router, addr: std::net::SocketAddr) -> std::io::Resul
                 async move { Ok::<_, std::convert::Infallible>(router.dispatch(req).await) }
             });
             tokio::spawn(async move {
-                let _ = http1::Builder::new().serve_connection(io, service).await;
+                // `.with_upgrades()` is required for `hyper::upgrade::on` to
+                // ever resolve -- without it hyper tears the connection down
+                // after the response instead of handing it off, and any
+                // `websocket_handler` route would hang forever waiting for
+                // an upgrade that never comes.
+                let _ = http1::Builder::new()
+                    .serve_connection(io, service)
+                    .with_upgrades()
+                    .await;
             });
         }
     });

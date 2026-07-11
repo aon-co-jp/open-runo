@@ -30,6 +30,7 @@ open-runo-api-types        = { workspace = true }
 open-runo-feature-flags    = { workspace = true }
 schemars = { workspace = true }
 sha2 = { workspace = true }
+sha1 = { workspace = true }
 hex = { workspace = true }
 open-runo-db               = { workspace = true }
 poem = { workspace = true }
@@ -52,3 +53,8 @@ flate2 = { workspace = true }
 jsonwebtoken = { workspace = true }
 poem = { workspace = true, features = ["test"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Test-only WebSocket client, purely to independently verify the from-scratch
+# server-side RFC 6455 implementation in `hyper_compat` (see
+# `handlers_hyper::tests::websocket_echo_round_trip_over_real_tcp`). Not used
+# by any production code path -- the server side is hand-rolled.
+tokio-tungstenite = "0.24"

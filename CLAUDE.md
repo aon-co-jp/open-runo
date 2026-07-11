@@ -147,6 +147,46 @@ WEBアプリ開発を効率的に行えるようにするための**フレーム
 
 ## HANDOFF(直近の自動実行パス)
 
+- **2026-07-11 汎用WebSocket対応をpoem-cosmo-tauriからミラー完了
+  (docs/poem-parity.md 3節、★★☆ギャップを解消)**: poem-cosmo-tauri側
+  コミット`53b10bf`で実装・実バイナリ検証済みだった、外部WebSocket
+  フレームワークを使わない**手書きRFC 6455実装**
+  (`crates/open-runo-router/src/hyper_compat.rs`の
+  `websocket_handler`/`WebSocketConnection`/フレームのパース・生成・
+  base64エンコード、いずれも手書き。唯一の追加依存は`sha1`
+  ——`Sec-WebSocket-Accept`のSHA-1計算のみに使用)を、
+  `hyper_compat.rs`・`handlers_hyper.rs`(`ws_echo_handler`/
+  `ws_events_handler`+テスト2本)・`lib.rs`(`GET /api/ws-echo`/
+  `GET /api/ws-events`の配線)・ルート`Cargo.toml`(`sha1`追加、
+  既存の`toml = "0.8"`行はFederatedBackend用途でこのリポジトリ固有の
+  ため保持したまま)・`open-runo-router/Cargo.toml`(`sha1`+
+  テスト専用dev-dependency`tokio-tungstenite`)・`docs/poem-parity.md`
+  をそのままコピーしてミラー。`hyper_compat::serve`の
+  `http1::Builder`に`.with_upgrades()`を追加した変更点(これが
+  ないと`hyper::upgrade::on`が解決せずWSハンドラがハングするだけの
+  実バグになる、poem-cosmo-tauri側で実装中に発見済み)も含む。
+  `cargo check --workspace` / `cargo test --workspace`
+  (open-runo-router: 94テスト、`websocket_echo_round_trip_over_real_tcp`・
+  `ws_events_rejects_missing_api_key`含む)ともfailed 0を確認。
+  **実バイナリでも独立に再検証**: `OPEN_RUNO_BIND_ADDR=
+  127.0.0.1:18412`で`cargo run -p open-runo-router`を起動し、
+  Node.js 26組み込みの`WebSocket`クライアントから`ws://127.0.0.1:18412/
+  api/ws-echo`に接続→`open-runo echo check`を送信→同一文字列がそのまま
+  エコーされて返ってくることを確認→クリーンにclose(poem-cosmo-tauri側
+  で確認した動作と同一結果)。
+  `docs/poem-parity.md`2節・3節・4節のWebSocket関連行を取り消し線+
+  「✅ 完了」に更新(内容はpoem-cosmo-tauri側と一致させたが、CRLF/LF
+  差異はそのまま維持——このリポジトリの当該ファイルは元々CRLFだった
+  ため、Editツールでの部分編集にとどめ全文上書きはしていない)。
+  `git status`clean化後commit・push(コミットハッシュは`git log`で
+  確認したものを次回パスへの引き継ぎとして記載する——ファイルコピー
+  だけで「ミラー完了」と書かないという前々回パスの教訓を踏襲)。
+  次回パスがすべきこと: `docs/cosmo-parity.md`4a節の残りのギャップ
+  (EDFS/Kafka連携・gRPC Connect対応・MCP Server統合、いずれも
+  ★★☆以下・実装コスト大)から次の実用性向上タスクを選び、
+  poem-cosmo-tauriで先行実装した上でこちらへミラーを継続(ユーザー
+  指示により確認不要で自動継続)。
+
 - **2026-07-11 gzip応答圧縮ミドルウェア実装をopen-runoへミラー完了
   (docs/poem-parity.md 3節、★★☆ギャップを解消 — 実装自体は
   poem-cosmo-tauri側で既に完了・push済みだったコミット

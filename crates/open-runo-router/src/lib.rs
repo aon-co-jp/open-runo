@@ -256,6 +256,19 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
             "/api/events",
             wrap(handlers_hyper::stream_events_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
+        // Generic WebSocket routes (docs/poem-parity.md 3, "generic
+        // WebSocket support"): NOT wrapped in `wrap(...)` -- `with_compression`
+        // buffers/rewrites the response body, which is harmless for an empty
+        // `101 Switching Protocols` body but pointless overhead for a route
+        // that's never going to have a compressible body; CORS/tracing add
+        // nothing an upgrade response needs either. Auth for `/api/ws-events`
+        // is enforced inside `ws_events_handler` itself instead.
+        .route(Method::GET, "/api/ws-echo", handlers_hyper::ws_echo_handler())
+        .route(
+            Method::GET,
+            "/api/ws-events",
+            handlers_hyper::ws_events_handler(Arc::clone(&state), Arc::clone(&guardian)),
+        )
         .route(
             Method::POST,
             "/api/feature-flags",
