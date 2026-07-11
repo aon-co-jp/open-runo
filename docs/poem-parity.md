@@ -41,7 +41,8 @@
 | ~~Multipart(ファイルアップロード)~~ | `hyper_compat::read_multipart_body` + `POST /api/schemas/upload` | ✅ 完了(2026-07-11)。RFC 7578手書きパーサー(`multer`等の外部crate不使用)。WASM管理UIに`<input type="file">`のアップロードUIを追加、実バイナリ+実ブラウザでファイル選択→アップロード→Schema Historyへの反映まで確認済み |
 | ~~Cookie/セッション管理~~ | `session.rs`(`SessionStore`)+ `POST /api/session/login`・`POST /api/session/logout` | ✅ 完了(2026-07-12)。X-Api-Keyに追加する形の認証経路(置き換えではない)。既存キーを`/api/session/login`へ渡すとHttpOnly+SameSite=Strict Cookie+CSRFトークンを発行。`register_schema_handler`/`register_schema_upload_handler`を実例としてセッション認証対応済み(他ハンドラは今後段階的に対応、self-issue-keyと同じ「基盤を先に導入し順次採用」パターン) |
 | ~~CSRF保護~~ | `auth_hyper::authenticate_with_session`のdouble-submitトークン検証 | ✅ 完了(2026-07-12)。セッションCookie認証時、POST/PUT/PATCH/DELETEは`X-CSRF-Token`ヘッダがログイン時発行のトークンと一致しないと403(X-Api-Key認証時は対象外——ヘッダは自動送信されずCSRFの対象外のため)。実バイナリ+curlでCSRF無し403→CSRF有り200→logout後401を確認済み |
-| TLS/ACME | ― | N/A(リバースプロキシでのTLS終端を前提、アプリ側では未実装) |
+| ~~TLS(rustls termination)~~ | `hyper_compat::tls::{load_tls_config, serve_tls}` | ✅ 完了(2026-07-12)。`tls` Cargo feature(既定オフ、リバースプロキシ前提のデプロイに不要な依存を持ち込まない)。自己署名証明書(`rcgen`はテスト専用)+実TLSハンドシェイク+平文HTTPクライアントが拒否されることを実バイナリ相当のテストで確認済み |
+| ACME(自動証明書発行) | ― | ❌ 未実装。RFC 8555の状態機械(directory/nonce/account/order/HTTP-01 challenge/finalize)をJWS署名込みで正しく実装するのは単体の大きめの作業であり、かつHTTP-01検証はCA側からこのサーバーへ公開インターネット経由で到達できる必要があるため、この開発環境(サンドボックス、公開ドメイン無し)では実運用のLet's Encryptに対する最終確認ができない。次パスで着手し、モックCAサーバーに対する実HTTPラウンドトリップテストで代替検証する方針(CLAUDE.mdタスク#17として引き続き追跡) |
 | gRPC(poem-grpc相当) | ― | ❌ 未実装 |
 | MCP Server(poem-mcpserver相当) | ― | ❌ 未実装 |
 

@@ -713,6 +713,181 @@ pub async fn serve(router: Router, addr: std::net::SocketAddr) -> std::io::Resul
     Ok((bound_addr, handle))
 }
 
+// ── TLS termination (rustls) ──────────────────────────────────────────────
+//
+// Poem-parity gap: Poem supports terminating TLS directly (native-tls /
+// openssl / rustls backends) instead of always requiring a reverse proxy in
+// front of it. This module is the rustls equivalent, gated behind the `tls`
+// Cargo feature so deployments that keep terminating TLS at a reverse proxy
+// (the existing default assumption for this app) don't pull in a TLS stack
+// they never use. ACME (automatic certificate provisioning, e.g. Let's
+// Encrypt) is a separate, much larger protocol -- see `docs/poem-parity.md`
+// for why it's tracked as a distinct follow-up rather than bundled here.
+#[cfg(feature = "tls")]
+pub mod tls {
+    use super::{Request, Response, Router};
+    use std::io;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::TlsAcceptor;
+
+    /// Load a rustls [`ServerConfig`] from a PEM certificate chain and PEM
+    /// private key on disk. No client-auth (mTLS) -- this app's auth is at
+    /// the HTTP layer (`X-Api-Key` / session cookies), not the TLS layer.
+    pub fn load_tls_config(cert_path: &Path, key_path: &Path) -> io::Result<ServerConfig> {
+        let cert_file = std::fs::File::open(cert_path)?;
+        let mut cert_reader = io::BufReader::new(cert_file);
+        let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut cert_reader)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        if certs.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "no certificates found in cert file"));
+        }
+
+        let key_file = std::fs::File::open(key_path)?;
+        let mut key_reader = io::BufReader::new(key_file);
+        let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key_reader)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no private key found in key file"))?;
+
+        ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
+    }
+
+    /// Serve `router` over a real TLS-terminated TCP listener, using
+    /// `tls_config` for the handshake. Otherwise identical to
+    /// [`super::serve`] (same router dispatch, same `.with_upgrades()` for
+    /// WebSocket support over TLS).
+    pub async fn serve_tls(
+        router: Router,
+        addr: std::net::SocketAddr,
+        tls_config: ServerConfig,
+    ) -> io::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
+        use hyper::server::conn::http1;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind(addr).await?;
+        let bound_addr = listener.local_addr()?;
+        let router = Arc::new(router);
+        let acceptor = TlsAcceptor::from(Arc::new(tls_config));
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(pair) => pair,
+                    Err(_) => continue,
+                };
+                let acceptor = acceptor.clone();
+                let router = Arc::clone(&router);
+                tokio::spawn(async move {
+                    let tls_stream = match acceptor.accept(stream).await {
+                        Ok(s) => s,
+                        // Handshake failures (bad client, port scanner, TLS
+                        // version mismatch) are routine on the open internet
+                        // -- drop the connection, don't take the listener down.
+                        Err(_) => return,
+                    };
+                    let io = TokioIo::new(tls_stream);
+                    let service = hyper::service::service_fn(move |req: Request| {
+                        let router = Arc::clone(&router);
+                        async move { Ok::<Response, std::convert::Infallible>(router.dispatch(req).await) }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).with_upgrades().await;
+                });
+            }
+        });
+
+        Ok((bound_addr, handle))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::hyper_compat::health_handler;
+        use hyper::Method;
+
+        /// Generates a throwaway self-signed cert/key pair (via `rcgen`,
+        /// dev-dependency only) and writes them to a temp dir, so tests
+        /// don't need a checked-in certificate. Follows the same
+        /// `std::env::temp_dir()` + UUID pattern as
+        /// `static_file_handler_serves_existing_file_and_404s_missing`.
+        fn self_signed_cert_files() -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+            let dir = std::env::temp_dir().join(format!("orn-tls-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])
+                .expect("generate self-signed cert");
+            let cert_path = dir.join("cert.pem");
+            let key_path = dir.join("key.pem");
+            std::fs::write(&cert_path, cert.cert.pem()).unwrap();
+            std::fs::write(&key_path, cert.key_pair.serialize_pem()).unwrap();
+            (cert_path, key_path, dir)
+        }
+
+        #[tokio::test]
+        async fn health_endpoint_serves_over_real_tls() {
+            let (cert_path, key_path, dir) = self_signed_cert_files();
+            let tls_config = load_tls_config(&cert_path, &key_path).expect("load tls config");
+
+            let router = Router::new().route(Method::GET, "/health", health_handler());
+            let (addr, _handle) = serve_tls(router, "127.0.0.1:0".parse().unwrap(), tls_config)
+                .await
+                .expect("bind ephemeral TLS port");
+
+            // Self-signed cert -> the client must be told not to verify the
+            // chain against a real CA. This is a test-only relaxation
+            // (`danger_accept_invalid_certs`); production deployments use a
+            // CA-issued certificate and a normal client.
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .build()
+                .expect("build TLS-tolerant client");
+
+            let resp = client
+                .get(format!("https://{addr}/health"))
+                .send()
+                .await
+                .expect("TLS request should succeed");
+            assert_eq!(resp.status(), reqwest::StatusCode::OK);
+            let body: serde_json::Value = resp.json().await.expect("valid json body");
+            assert_eq!(body["status"], "ok");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[tokio::test]
+        async fn plain_http_client_cannot_talk_to_a_tls_listener() {
+            let (cert_path, key_path, dir) = self_signed_cert_files();
+            let tls_config = load_tls_config(&cert_path, &key_path).expect("load tls config");
+
+            let router = Router::new().route(Method::GET, "/health", health_handler());
+            let (addr, _handle) = serve_tls(router, "127.0.0.1:0".parse().unwrap(), tls_config)
+                .await
+                .expect("bind ephemeral TLS port");
+
+            // A plain (non-TLS) client speaking HTTP to a TLS listener
+            // should fail the request rather than somehow succeed --
+            // proves the listener is actually enforcing a TLS handshake,
+            // not just happening to work because the two ports overlap.
+            let client = reqwest::Client::new();
+            let result = client.get(format!("http://{addr}/health")).send().await;
+            assert!(result.is_err(), "plain HTTP to a TLS-only listener should fail, not succeed");
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn load_tls_config_errors_on_missing_files() {
+            let result = load_tls_config(Path::new("/no/such/cert.pem"), Path::new("/no/such/key.pem"));
+            assert!(result.is_err());
+        }
+    }
+}
+
 /// A single registered route: method + path pattern (`:name` segments) + handler.
 struct Route {
     method: Method,

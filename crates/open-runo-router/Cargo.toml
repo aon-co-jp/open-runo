@@ -48,6 +48,15 @@ hyper-util = { version = "0.1", features = ["full"] }
 http-body-util = "0.1"
 bytes = "1.9"
 flate2 = { workspace = true }
+# Poem-parity: TLS termination (`hyper_compat::tls`), opt-in via the `tls`
+# feature so a deployment that terminates TLS at a reverse proxy (the
+# existing default assumption) doesn't pull in a TLS stack it never uses.
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
+rustls-pemfile = { version = "2.2", optional = true }
+
+[features]
+tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
 
 [dev-dependencies]
 jsonwebtoken = { workspace = true }
@@ -58,3 +67,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # `handlers_hyper::tests::websocket_echo_round_trip_over_real_tcp`). Not used
 # by any production code path -- the server side is hand-rolled.
 tokio-tungstenite = "0.24"
+# Test-only: generates a throwaway self-signed cert/key pair so
+# `hyper_compat::tls` can be verified end-to-end over a real TLS handshake
+# without checking a certificate into the repo. Not used by production code.
+rcgen = "0.13"
