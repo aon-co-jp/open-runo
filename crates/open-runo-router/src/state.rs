@@ -6,6 +6,7 @@
 //! The `db` field exposes the DUAL DATABASE backend so `/api/db/*`
 //! handlers can persist and retrieve records across PostgreSQL and aruaru-db.
 
+use crate::acme::ChallengeStore;
 use crate::session::SessionStore;
 use open_runo_db::{DbBackend, InMemoryBackend};
 use open_runo_federation::ComposedSchema;
@@ -45,6 +46,12 @@ pub struct AppState {
     /// Cookie-based sessions, additive to `X-Api-Key` auth (Poem-parity
     /// gap: Cookie/session management, see `session.rs`).
     pub sessions: Arc<SessionStore>,
+    /// Published HTTP-01 challenge responses, served at
+    /// `GET /.well-known/acme-challenge/:token` (Poem-parity gap: ACME,
+    /// see `acme.rs`). Always present regardless of the `acme` feature --
+    /// serving this path is cheap and useful even when an external ACME
+    /// client (not this crate's own) is the one publishing into it.
+    pub acme_challenges: Arc<ChallengeStore>,
 }
 
 impl AppState {
@@ -58,6 +65,7 @@ impl AppState {
             events: broadcast::channel(EVENT_CAPACITY).0,
             feature_flags: Arc::new(Mutex::new(FeatureFlagRegistry::new())),
             sessions: Arc::new(SessionStore::new()),
+            acme_challenges: Arc::new(ChallengeStore::new()),
         }
     }
 
@@ -71,6 +79,7 @@ impl AppState {
             events: broadcast::channel(EVENT_CAPACITY).0,
             feature_flags: Arc::new(Mutex::new(FeatureFlagRegistry::new())),
             sessions: Arc::new(SessionStore::new()),
+            acme_challenges: Arc::new(ChallengeStore::new()),
         }
     }
 

@@ -54,9 +54,27 @@ flate2 = { workspace = true }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
 rustls-pemfile = { version = "2.2", optional = true }
+# Poem-parity: ACME (docs/poem-parity.md). `ring` provides the audited
+# ES256 (ECDSA P-256/SHA-256) signing primitive for JWS -- the ACME
+# *protocol* (directory/nonce/account/order/challenge state machine, JWS
+# envelope construction) is hand-rolled the same way this crate hand-rolls
+# WebSocket framing and multipart parsing, but the actual cryptographic
+# signing operation is delegated to an audited library rather than
+# reimplemented, matching this codebase's existing sha1/sha2 boundary.
+# `reqwest` is the outbound client (the ACME CA is called *by* this
+# process, unlike every other dependency here which serves inbound
+# requests) -- already present transitively via
+# open-runo-observability's OTLP exporter, so this isn't a wholly new
+# addition to the binary's dependency graph. `rcgen` builds the CSR
+# submitted at order-finalization time (promoted here from dev-only,
+# where it already existed for TLS test certificates).
+ring = { version = "0.17", optional = true }
+reqwest = { version = "0.12", optional = true, default-features = false, features = ["json", "rustls-tls"] }
+rcgen = { version = "0.13", optional = true }
 
 [features]
 tls = ["dep:rustls", "dep:tokio-rustls", "dep:rustls-pemfile"]
+acme = ["tls", "dep:ring", "dep:reqwest", "dep:rcgen"]
 
 [dev-dependencies]
 jsonwebtoken = { workspace = true }

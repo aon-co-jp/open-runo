@@ -42,7 +42,7 @@
 | ~~Cookie/セッション管理~~ | `session.rs`(`SessionStore`)+ `POST /api/session/login`・`POST /api/session/logout` | ✅ 完了(2026-07-12)。X-Api-Keyに追加する形の認証経路(置き換えではない)。既存キーを`/api/session/login`へ渡すとHttpOnly+SameSite=Strict Cookie+CSRFトークンを発行。`register_schema_handler`/`register_schema_upload_handler`を実例としてセッション認証対応済み(他ハンドラは今後段階的に対応、self-issue-keyと同じ「基盤を先に導入し順次採用」パターン) |
 | ~~CSRF保護~~ | `auth_hyper::authenticate_with_session`のdouble-submitトークン検証 | ✅ 完了(2026-07-12)。セッションCookie認証時、POST/PUT/PATCH/DELETEは`X-CSRF-Token`ヘッダがログイン時発行のトークンと一致しないと403(X-Api-Key認証時は対象外——ヘッダは自動送信されずCSRFの対象外のため)。実バイナリ+curlでCSRF無し403→CSRF有り200→logout後401を確認済み |
 | ~~TLS(rustls termination)~~ | `hyper_compat::tls::{load_tls_config, serve_tls}` | ✅ 完了(2026-07-12)。`tls` Cargo feature(既定オフ、リバースプロキシ前提のデプロイに不要な依存を持ち込まない)。自己署名証明書(`rcgen`はテスト専用)+実TLSハンドシェイク+平文HTTPクライアントが拒否されることを実バイナリ相当のテストで確認済み |
-| ACME(自動証明書発行) | ― | ❌ 未実装。RFC 8555の状態機械(directory/nonce/account/order/HTTP-01 challenge/finalize)をJWS署名込みで正しく実装するのは単体の大きめの作業であり、かつHTTP-01検証はCA側からこのサーバーへ公開インターネット経由で到達できる必要があるため、この開発環境(サンドボックス、公開ドメイン無し)では実運用のLet's Encryptに対する最終確認ができない。次パスで着手し、モックCAサーバーに対する実HTTPラウンドトリップテストで代替検証する方針(CLAUDE.mdタスク#17として引き続き追跡) |
+| ~~ACME(自動証明書発行)~~ | `crates/open-runo-router/src/acme.rs`(`AcmeClient`、`acme` feature) | ✅ 完了(2026-07-12)。RFC 8555のHTTP-01チャレンジ経路(directory→nonce→account→order→authorization→challenge→finalize→download)を手書き実装。JWS署名は`ring`のES256(ECDSA P-256/SHA-256、fixed r‖s形式)を使用(生の楕円曲線演算は自前実装せず、既にこのcrateがWebSocket/APIキーハッシュでsha1/sha2を使う方針と同じ境界線)。`ChallengeStore`+`GET /.well-known/acme-challenge/:token`は`acme` feature非依存で常時コンパイル。**検証範囲の明記**: HTTP-01検証はCA側からこのサーバーへ公開インターネット経由で到達できる必要があり、この開発環境(サンドボックス、公開ドメイン無し)では実運用のLet's Encryptに対する最終確認はできない。代わりに、`hyper_compat::serve`で構築した実チャレンジ応答サーバー(本番と同じ`ChallengeStore`/`challenge_response_handler`)と、実際にそのサーバーへ実HTTPで公開鍵認証をフェッチしに行くモックCAサーバーの、2つの独立プロセス間の実HTTPラウンドトリップで全フローを検証(`acme::client::tests::full_http01_flow_against_mock_ca_with_real_challenge_loopback`)。ES256署名が正しいfixed-length形式(64バイト、ASN.1 DERではない)であることも単体テストで確認済み |
 | gRPC(poem-grpc相当) | ― | ❌ 未実装 |
 | MCP Server(poem-mcpserver相当) | ― | ❌ 未実装 |
 
@@ -54,13 +54,14 @@
 | ~~汎用WebSocket対応~~ | ★★☆ | ✅ 完了(2026-07-11)。RFC 6455ハンドシェイク・フレーミングを`sha1`のみでhyper_compatに手書き実装、実バイナリ+実WSクライアント(Node.js `WebSocket`)でエコーの往復を確認 |
 | ~~Multipart/ファイルアップロード~~ | ★☆☆ | ✅ 完了(2026-07-11)。`POST /api/schemas/upload`でSDLファイルの直接アップロードに対応 |
 | ~~Cookie/セッション + CSRF~~ | ★☆☆ | ✅ 完了(2026-07-12)。X-Api-Key認証への追加経路として実装(置き換えではない) |
+| ~~ACME(自動証明書発行)~~ | ★★☆ | ✅ 完了(2026-07-12)。HTTP-01のみ(DNS-01/TLS-ALPN-01は未対応) |
 | gRPC / MCP Server対応 | ★☆☆ | `docs/cosmo-parity.md`のCosmo側ギャップ(gRPC/MCP)と重複。着手中(CLAUDE.mdタスク#18〜#19)。「未着手」は先送り理由にならない(2026-07-12付ユーザー指示、CLAUDE.md運用ルール参照)ため、次パスで着手する |
 
 ## 4. 結論
 
 hyper_compatはPoemの**コア機能(ルーティング・エクストラクタ・レスポンス・
-ミドルウェア・SSE・静的配信・テスト・Multipart・Cookie/セッション+CSRF)を
-実用上必要十分にカバー**している。gzip圧縮・汎用WebSocket・Multipart
-ファイルアップロード・Cookie/セッション管理・CSRF保護はいずれも
-2026-07-11〜12に実装完了。残るギャップ(TLS/ACME・gRPC・MCP Server)は
-CLAUDE.mdのタスク一覧#17〜#19として着手中。
+ミドルウェア・SSE・静的配信・テスト・Multipart・Cookie/セッション+CSRF・
+TLS・ACME)を実用上必要十分にカバー**している。gzip圧縮・汎用WebSocket・
+Multipartファイルアップロード・Cookie/セッション管理・CSRF保護・TLS終端・
+ACME(HTTP-01)はいずれも2026-07-11〜12に実装完了。残るギャップ
+(gRPC・MCP Server)はCLAUDE.mdのタスク一覧#18〜#19として着手中。

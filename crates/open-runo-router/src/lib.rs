@@ -25,6 +25,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #![recursion_limit = "256"]
 
+pub mod acme;
 pub mod audit;
 pub mod auth_hyper;
 pub mod handlers_hyper;
@@ -82,6 +83,11 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
         .route(Method::GET, "/health", wrap(hyper_compat::health_handler()))
         .route(Method::GET, "/healthz", wrap(hyper_compat::health_handler()))
         .route(Method::GET, "/api/openapi.json", wrap(openapi::openapi_handler()))
+        .route(
+            Method::GET,
+            "/.well-known/acme-challenge/:token",
+            wrap(acme::challenge_response_handler(Arc::clone(&state.acme_challenges))),
+        )
         .route(
             Method::POST,
             "/api/keys/self-issue",
