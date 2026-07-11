@@ -4,11 +4,12 @@
 //! returns a `hyper_compat::Handler` closing over whatever state it needs,
 //! matching the JSON shape/status codes of its poem counterpart exactly.
 
-use crate::auth_hyper::check_api_key;
+use crate::auth_hyper::{authenticate_with_session, check_api_key};
 use crate::hyper_compat::{
     empty_status, json_response, query_params, read_json_body, sse_response, Handler, Response, SseEvent,
 };
-use crate::keyring::KeyGuardian;
+use crate::keyring::{KeyDecision, KeyGuardian};
+use crate::session::SessionStore;
 use crate::state::AppState;
 use crate::validation::{DB_UPSERT_REQUEST, FEATURE_FLAG_REQUEST, REGISTER_SCHEMA_REQUEST};
 use hyper::StatusCode;
@@ -551,10 +552,11 @@ pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
 
             let raw: serde_json::Value = match read_json_body(req).await {
                 Ok(v) => v,
@@ -603,10 +605,11 @@ pub fn register_schema_upload_handler(state: Arc<AppState>, guardian: Arc<KeyGua
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
 
             let fields = match crate::hyper_compat::read_multipart_body(req).await {
                 Ok(f) => f,
@@ -1786,6 +1789,82 @@ pub fn self_issue_key_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) 
 
 const SELF_ISSUE_KEY_TTL_HOURS: i64 = 24;
 
+#[derive(Serialize)]
+struct SessionLoginResponse {
+    owner: String,
+    csrf_token: String,
+    expires_in_secs: i64,
+}
+
+/// POST /api/session/login — Poem-parity: Cookie/session management
+/// (`docs/poem-parity.md`), additive to `X-Api-Key`. Exchanges an already-
+/// valid `X-Api-Key` (self-issued, SCIM-issued, whatever the caller already
+/// holds — this endpoint doesn't replace KeyGuardian, it rides on top of
+/// it) for an `HttpOnly` session cookie plus a CSRF token, for callers that
+/// would rather have the browser remember "who is this" than attach a
+/// header by hand on every request. See `session.rs` module doc for the
+/// CSRF double-submit design and `auth_hyper::authenticate_with_session`
+/// for how the resulting session is later accepted.
+pub fn session_login_handler(guardian: Arc<KeyGuardian>, sessions: Arc<SessionStore>) -> Handler {
+    Arc::new(move |req, _params| {
+        let guardian = Arc::clone(&guardian);
+        let sessions = Arc::clone(&sessions);
+        Box::pin(async move {
+            let api_key = req
+                .headers()
+                .get("x-api-key")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if api_key.is_empty() {
+                return empty_status(StatusCode::UNAUTHORIZED);
+            }
+
+            let (owner, roles) = match guardian.verify(&api_key, chrono::Utc::now()).await {
+                KeyDecision::RegistryEmpty => ("dev".to_string(), Vec::new()),
+                KeyDecision::Ok { owner, roles } => (owner, roles),
+                KeyDecision::Rejected | KeyDecision::Suspended => {
+                    return empty_status(StatusCode::UNAUTHORIZED)
+                }
+            };
+
+            let (session_id, csrf_token) = sessions.create(owner.clone(), roles);
+            let mut resp = json_response(
+                StatusCode::OK,
+                &SessionLoginResponse {
+                    owner,
+                    csrf_token,
+                    expires_in_secs: crate::session::SESSION_TTL_HOURS * 3600,
+                },
+            );
+            if let Ok(value) = crate::session::set_cookie_header(&session_id).parse() {
+                resp.headers_mut().insert(hyper::header::SET_COOKIE, value);
+            }
+            resp
+        })
+    })
+}
+
+/// POST /api/session/logout — destroys the session named by the
+/// `orn_session` cookie (if any) and clears the cookie. Idempotent: logging
+/// out with no session, or an already-expired one, still returns `200`.
+pub fn session_logout_handler(sessions: Arc<SessionStore>) -> Handler {
+    Arc::new(move |req, _params| {
+        let sessions = Arc::clone(&sessions);
+        Box::pin(async move {
+            if let Some(session_id) = crate::session::session_id_from_cookie_header(req.headers()) {
+                sessions.destroy(&session_id);
+            }
+            let mut resp = json_response(StatusCode::OK, &serde_json::json!({ "logged_out": true }));
+            if let Ok(value) = crate::session::clear_cookie_header().parse() {
+                resp.headers_mut().insert(hyper::header::SET_COOKIE, value);
+            }
+            resp
+        })
+    })
+}
+
 fn to_flag_response(flag: &FeatureFlag) -> FeatureFlagResponse {
     FeatureFlagResponse {
         name: flag.name.clone(),
@@ -2376,6 +2455,159 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// Full Poem-parity Cookie/session lifecycle over real HTTP: issue a
+    /// real API key (not the RegistryEmpty dev fast-path), exchange it for
+    /// a session via `/api/session/login`, register a schema using
+    /// *only* the session cookie + CSRF token (no `X-Api-Key` at all),
+    /// confirm a state-changing request without the CSRF token is
+    /// rejected, then log out and confirm the session no longer works.
+    #[tokio::test]
+    async fn session_login_then_register_schema_via_cookie_then_logout() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let real_key = guardian
+            .issue("carol", vec!["developer".to_string()], None)
+            .await
+            .expect("issuing a real key should succeed");
+
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/session/login",
+                session_login_handler(Arc::clone(&guardian), Arc::clone(&state.sessions)),
+            )
+            .route(
+                Method::POST,
+                "/api/session/logout",
+                session_logout_handler(Arc::clone(&state.sessions)),
+            )
+            .route(
+                Method::POST,
+                "/api/schemas",
+                register_schema_handler(Arc::clone(&state), Arc::clone(&guardian)),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        // 1. Exchange the real API key for a session.
+        let login_resp = client
+            .post(format!("http://{addr}/api/session/login"))
+            .header("x-api-key", &real_key)
+            .send()
+            .await
+            .expect("login request should succeed");
+        assert_eq!(login_resp.status(), reqwest::StatusCode::OK);
+        let set_cookie = login_resp
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("login should set a session cookie")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(set_cookie.contains("HttpOnly"));
+        let cookie_pair = set_cookie.split(';').next().unwrap().to_string();
+        let login_body: serde_json::Value = login_resp.json().await.unwrap();
+        assert_eq!(login_body["owner"], "carol");
+        let csrf_token = login_body["csrf_token"].as_str().unwrap().to_string();
+        assert!(!csrf_token.is_empty());
+
+        // 2. A state-changing request with the cookie but NO CSRF token is
+        // forbidden, even though the session itself is valid.
+        let resp = client
+            .post(format!("http://{addr}/api/schemas"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .json(&serde_json::json!({ "service_name": "orders", "sdl": "type Order { id: ID! }" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::FORBIDDEN);
+
+        // 3. With the cookie AND the matching CSRF token, it succeeds --
+        // and no X-Api-Key header was sent at all for this request.
+        let resp = client
+            .post(format!("http://{addr}/api/schemas"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header("x-csrf-token", &csrf_token)
+            .json(&serde_json::json!({ "service_name": "orders", "sdl": "type Order { id: ID! }" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["service_name"], "orders");
+
+        // 4. Log out, which destroys the session and clears the cookie.
+        let logout_resp = client
+            .post(format!("http://{addr}/api/session/logout"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .expect("logout request should succeed");
+        assert_eq!(logout_resp.status(), reqwest::StatusCode::OK);
+        let clear_cookie = logout_resp
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .expect("logout should clear the cookie")
+            .to_str()
+            .unwrap();
+        assert!(clear_cookie.contains("Max-Age=0"));
+
+        // 5. The now-destroyed session no longer authenticates anything,
+        // even with the previously-valid CSRF token.
+        let resp = client
+            .post(format!("http://{addr}/api/schemas"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header("x-csrf-token", &csrf_token)
+            .json(&serde_json::json!({ "service_name": "orders2", "sdl": "type Order2 { id: ID! }" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn session_login_rejects_missing_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/session/login",
+            session_login_handler(Arc::clone(&guardian), Arc::clone(&state.sessions)),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/session/login"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn session_logout_without_a_cookie_is_still_ok() {
+        let state = Arc::new(AppState::new());
+        let router = Router::new().route(
+            Method::POST,
+            "/api/session/logout",
+            session_logout_handler(Arc::clone(&state.sessions)),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/session/logout"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]

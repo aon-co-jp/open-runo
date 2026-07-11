@@ -34,6 +34,7 @@ pub mod maintenance;
 pub mod middleware;
 pub mod middleware_hyper;
 pub mod openapi;
+pub mod session;
 pub mod state;
 pub mod validation;
 
@@ -85,6 +86,16 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
             Method::POST,
             "/api/keys/self-issue",
             wrap(handlers_hyper::self_issue_key_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::POST,
+            "/api/session/login",
+            wrap(handlers_hyper::session_login_handler(Arc::clone(&guardian), Arc::clone(&state.sessions))),
+        )
+        .route(
+            Method::POST,
+            "/api/session/logout",
+            wrap(handlers_hyper::session_logout_handler(Arc::clone(&state.sessions))),
         )
         .route(
             Method::POST,
