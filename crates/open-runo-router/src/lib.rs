@@ -33,6 +33,7 @@ pub mod handlers_hyper;
 pub mod hyper_compat;
 pub mod keyring;
 pub mod maintenance;
+pub mod mcp;
 pub mod middleware;
 pub mod middleware_hyper;
 pub mod openapi;
@@ -93,6 +94,11 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
             Method::POST,
             "/api/keys/self-issue",
             wrap(handlers_hyper::self_issue_key_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
+            Method::POST,
+            "/mcp",
+            wrap(mcp::mcp_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
         .route(
             Method::POST,
