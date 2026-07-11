@@ -3393,6 +3393,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-runo-feature-flags"
+version = "0.1.0"
+dependencies = [
+ "open-runo-core",
+ "serde",
+]
+
+[[package]]
 name = "open-runo-federation"
 version = "0.1.0"
 dependencies = [
