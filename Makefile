@@ -5,7 +5,7 @@
 CARGO ?= cargo
 
 .PHONY: help build release test fmt fmt-check clippy audit deny doc \
-        run run-router clean quality-gate ci pre-commit wasm-frontend
+        run run-router clean quality-gate ci pre-commit wasm-frontend tray
 
 help:
 	@echo "open-runo make targets:"
@@ -20,6 +20,7 @@ help:
 	@echo "  make doc            - cargo doc --workspace --no-deps"
 	@echo "  make run-router     - run the open-runo-router gateway locally"
 	@echo "  make wasm-frontend  - build apps/desktop-wasm and regenerate www/pkg (needs wasm32-unknown-unknown + wasm-bindgen-cli)"
+	@echo "  make tray           - build the apps/desktop-tray native tray companion (release)"
 	@echo "  make quality-gate   - fmt-check + clippy + test + audit + deny (full CI gate)"
 	@echo "  make pre-commit     - fmt + clippy + test (fast local pre-commit loop)"
 	@echo "  make clean          - cargo clean"
@@ -64,6 +65,14 @@ wasm-frontend:
 	wasm-bindgen --target web --no-typescript --out-dir apps/desktop-wasm/www/pkg \
 		apps/desktop-wasm/target/wasm32-unknown-unknown/debug/open_runo_desktop_wasm.wasm
 	@echo "WASM frontend rebuilt: apps/desktop-wasm/www/pkg"
+
+# Build the native tray companion (apps/desktop-tray). Its own standalone
+# workspace, like apps/desktop-wasm -- kept out of the main workspace so
+# tray-icon/tao/notify-rust don't pollute the server binary's dependency
+# graph. See apps/desktop-tray/README.md for the Windows installer step.
+tray:
+	cd apps/desktop-tray && $(CARGO) build --release
+	@echo "Tray companion built: apps/desktop-tray/target/release/"
 
 clean:
 	$(CARGO) clean

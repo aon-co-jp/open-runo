@@ -1,0 +1,23 @@
+[workspace]
+
+[package]
+name = "open-runo-desktop-tray"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["open-runo Contributors"]
+license = "Apache-2.0 OR MIT"
+description = "open-runo native tray companion: system tray icon + native OS notifications for the browser-based WASM admin UI, without depending on the tauri package."
+
+[[bin]]
+name = "open-runo-tray"
+path = "src/main.rs"
+
+[dependencies]
+tray-icon = "0.19"
+tao = "0.30"
+notify-rust = "4"
+
+[profile.release]
+opt-level = "s"
+lto = true
