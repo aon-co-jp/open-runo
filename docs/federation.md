@@ -11,6 +11,32 @@ Implemented in [`crates/open-runo-federation`](../crates/open-runo-federation).
 - `detect_breaking_changes(previous, next) -> Vec<String>`: flags removed
   types/fields between two composed schemas.
 
+## SDL parsing and Federation v1/v2 compatibility (2026-07-11)
+
+`crates/open-runo-federation/src/sdl.rs` adds `parse_service_sdl(service_name,
+sdl) -> Result<ServiceSchema>`, a minimal hand-written GraphQL SDL parser
+that extracts `type`/`interface`/`extend type` field names — this is what
+lets `POST /api/federation/compose` accept a subgraph's *real* SDL text
+(via an optional `sdl` field on each service entry) instead of requiring
+callers to pre-extract a `{type: [fields]}` JSON map by hand.
+
+`detect_federation_version(sdl) -> FederationVersion` classifies a
+subgraph's dialect:
+
+- **V2**: an `@link(url: "https://specs.apollo.dev/federation/v2...")`
+  import is present.
+- **V1**: no such import, but classic directives (`@key`, `@requires`,
+  `@provides`, `@external`) appear directly — the pre-Federation-2
+  convention where these directives were implicitly available.
+- **None**: no federation directives at all.
+
+Both dialects place their directives/arguments in the same syntactic
+positions, so the parser is directive-content-agnostic (it skips
+`@directive(...)` tokens wherever they occur) and handles v1 and v2
+subgraphs identically. See `sdl::tests::v1_and_v2_subgraphs_compose_together_into_one_supergraph`
+for a test that parses one authentic v1-style and one authentic v2-style
+subgraph and composes them into a single correct supergraph.
+
 ## Not yet implemented
 
 Query planning, distributed execution, and full GraphQL/gRPC/OpenAPI

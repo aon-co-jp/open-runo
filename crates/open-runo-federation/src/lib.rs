@@ -13,6 +13,18 @@ use open_runo_core::{AppError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod sdl;
+pub use sdl::{detect_federation_version, parse_service_sdl};
+
+/// Which Apollo Federation dialect a subgraph's raw SDL follows. See
+/// [`sdl::detect_federation_version`] for detection rules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FederationVersion {
+    V1,
+    V2,
+    None,
+}
+
 /// A single backend service participating in federation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceSchema {

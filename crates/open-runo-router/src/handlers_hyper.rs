@@ -84,7 +84,16 @@ pub fn federation_status_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
 #[derive(Debug, Deserialize)]
 struct ServiceInput {
     service_name: String,
+    /// Pre-structured type -> field-name map. Optional when `sdl` is
+    /// given; otherwise required.
+    #[serde(default)]
     types: std::collections::BTreeMap<String, Vec<String>>,
+    /// Real GraphQL subgraph SDL text (Federation v1 *or* v2 style — both
+    /// are accepted transparently, see `open_runo_federation::sdl`). When
+    /// present, this is parsed to derive the type/field map instead of
+    /// requiring the caller to pre-extract it into `types`.
+    #[serde(default)]
+    sdl: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,18 +123,30 @@ pub fn compose_schemas_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
                 Err(resp) => return resp,
             };
 
-            let service_schemas: Vec<open_runo_federation::ServiceSchema> = body
-                .services
-                .into_iter()
-                .map(|s| open_runo_federation::ServiceSchema {
-                    service_name: s.service_name,
-                    types: s
-                        .types
-                        .into_iter()
-                        .map(|(k, v)| (k, std::collections::BTreeSet::from_iter(v)))
-                        .collect(),
-                })
-                .collect();
+            let mut service_schemas: Vec<open_runo_federation::ServiceSchema> = Vec::new();
+            for s in body.services {
+                let schema = if let Some(sdl) = s.sdl {
+                    match open_runo_federation::parse_service_sdl(&s.service_name, &sdl) {
+                        Ok(schema) => schema,
+                        Err(e) => {
+                            return json_response(
+                                StatusCode::UNPROCESSABLE_ENTITY,
+                                &serde_json::json!({ "error": e.to_string() }),
+                            )
+                        }
+                    }
+                } else {
+                    open_runo_federation::ServiceSchema {
+                        service_name: s.service_name,
+                        types: s
+                            .types
+                            .into_iter()
+                            .map(|(k, v)| (k, std::collections::BTreeSet::from_iter(v)))
+                            .collect(),
+                    }
+                };
+                service_schemas.push(schema);
+            }
 
             let new_composed = match open_runo_federation::compose(&service_schemas) {
                 Ok(c) => c,

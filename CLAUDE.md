@@ -147,6 +147,33 @@ WEBアプリ開発を効率的に行えるようにするための**フレーム
 
 ## HANDOFF(直近の自動実行パス)
 
+- **2026-07-11 Federation v1/v2互換ギャップ解消をpoem-cosmo-tauriから
+  ミラー完了(docs/cosmo-parity.md 4a節、★☆☆)**: poem-cosmo-tauri側
+  コミット`b65013e`で実装・実バイナリ検証済みだった、SDLパーサー新設
+  (`crates/open-runo-federation/src/sdl.rs`: `parse_service_sdl`/
+  `detect_federation_version`)+`POST /api/federation/compose`への
+  `sdl: Option<String>`配線(`crates/open-runo-router/src/
+  handlers_hyper.rs`のServiceInput)を、同じ`lib.rs`/`sdl.rs`/
+  `handlers_hyper.rs`/`docs/cosmo-parity.md`/`docs/federation.md`をこちら
+  へコピーする形でミラー。`cargo test --workspace`(全37テストバイナリ、
+  open-runo-federation: 4→11テスト)でfailed 0を確認後、
+  **このリポジトリ自身の実バイナリで再検証**(`cargo run -p
+  open-runo-router`、`OPEN_RUNO_BIND_ADDR=127.0.0.1:18722`):
+  本物のFederation v1スタイル部分グラフ(bare `@key`/`@external`、
+  `@link`無し)と本物のv2スタイル部分グラフ(`@link(url:
+  "https://specs.apollo.dev/federation/v2.3"...)`+`@shareable`)を
+  同一の`POST /api/federation/compose`リクエストで送信し、
+  poem-cosmo-tauri側と**バイト単位で同一のレスポンス**
+  (`{"contributing_services":["users-service-v1","billing-service-v2"],
+  "types":{"Query":["billingHealth","me"],"Review":["author","body","id"],
+  "User":["balanceCents","id","name","plan","reviews"]},
+  "breaking_changes":[]}`、`GET /api/federation/status`も
+  `type_count:3, field_count:10`一致)を確認済み——ファイルコピーだけで
+  終わらせず、実際にcommit・push完了したことを本エントリと
+  `git log`で確認できる状態にしている(直後の`git log`確認を参照)。
+  次回パスがすべきこと: `docs/cosmo-parity.md`4a節の残りのギャップ
+  (EDFS/Kafka連携・gRPC Connect対応・MCP Server統合)から次を選ぶ。
+
 - **2026-07-11 汎用WebSocket対応をpoem-cosmo-tauriからミラー完了
   (docs/poem-parity.md 3節、★★☆ギャップを解消)**: poem-cosmo-tauri側
   コミット`53b10bf`で実装・実バイナリ検証済みだった、外部WebSocket
