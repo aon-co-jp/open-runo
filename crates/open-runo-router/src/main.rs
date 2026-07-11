@@ -5,7 +5,7 @@
 //! process, run the `open-runo-gateway` binary instead.
 
 use open_runo_core::Config;
-use open_runo_router::{build_hyper_app, hyper_compat, state::AppState};
+use open_runo_router::{build_hyper_app, grpc, hyper_compat, state::AppState};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -37,6 +37,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| format!("invalid bind_addr {:?}: {e}", config.bind_addr))?;
     let (bound, handle) = hyper_compat::serve(app, addr).await?;
     tracing::info!(%bound, "open-runo-router listening");
+
+    // gRPC (grpc.health.v1.Health/Check, docs/poem-parity.md) is opt-in via
+    // a dedicated port -- unset by default so deployments that don't use
+    // gRPC don't get a second listener they never asked for. h2c (no TLS)
+    // matches how most internal/dev gRPC traffic runs; see grpc.rs's
+    // module doc for why this can't share the REST listener's port.
+    if let Ok(grpc_bind_addr) = std::env::var("OPEN_RUNO_GRPC_BIND_ADDR") {
+        let grpc_addr = grpc_bind_addr
+            .parse()
+            .map_err(|e| format!("invalid OPEN_RUNO_GRPC_BIND_ADDR {grpc_bind_addr:?}: {e}"))?;
+        let (grpc_bound, _grpc_handle) = grpc::serve_grpc(grpc_addr).await?;
+        tracing::info!(bound = %grpc_bound, "open-runo-router gRPC (grpc.health.v1.Health) listening");
+    }
+
     handle.await?;
 
     Ok(())

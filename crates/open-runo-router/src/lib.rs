@@ -28,6 +28,7 @@
 pub mod acme;
 pub mod audit;
 pub mod auth_hyper;
+pub mod grpc;
 pub mod handlers_hyper;
 pub mod hyper_compat;
 pub mod keyring;
