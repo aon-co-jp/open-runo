@@ -66,12 +66,15 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
 
     maintenance::spawn(Arc::clone(&state), Arc::clone(&page_cache));
 
-    // Wrap every non-health route: rate-limit → tracing → CORS (CORS
-    // outermost so preflight requests never reach the limiter/handler).
+    // Wrap every non-health route: rate-limit → tracing → CORS → compression
+    // (CORS around the limiter/handler so preflight requests never reach
+    // them; compression outermost since it operates on whatever response
+    // body the inner stack ultimately produced, including CORS preflight
+    // and rate-limit-exceeded responses).
     let wrap = |h: Handler| -> Handler {
-        middleware_hyper::with_cors(middleware_hyper::with_tracing(
+        middleware_hyper::with_compression(middleware_hyper::with_cors(middleware_hyper::with_tracing(
             middleware_hyper::with_shared_rate_limit(h, Arc::clone(&limiter)),
-        ))
+        )))
     };
 
     Router::new()

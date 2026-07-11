@@ -147,6 +147,48 @@ WEBアプリ開発を効率的に行えるようにするための**フレーム
 
 ## HANDOFF(直近の自動実行パス)
 
+- **2026-07-11 gzip応答圧縮ミドルウェア実装をopen-runoへミラー完了
+  (docs/poem-parity.md 3節、★★☆ギャップを解消 — 実装自体は
+  poem-cosmo-tauri側で既に完了・push済みだったコミット
+  `9a2e209`だったが、このリポジトリへのミラーが未完了のまま残っていた)**:
+  セッション開始時、このリポジトリには`middleware_hyper.rs`/
+  `hyper_compat.rs`/`lib.rs`/`Cargo.toml`/`docs/poem-parity.md`に
+  未コミットの差分(=前パスが部分的にミラー作業をしていた形跡)が
+  既に存在していた。中身を`poem-cosmo-tauri`側の該当コミットと
+  diffで突き合わせたところ、`with_compression`本体・テスト3本
+  (`compression_gzips_large_body_when_accepted`/
+  `compression_is_skipped_without_accept_encoding`/
+  `compression_skips_small_bodies_even_when_accepted`)・
+  `build_hyper_app`の配線(`with_compression`を最も外側にラップ —
+  rate-limit超過やCORS preflightのレスポンスも含めて圧縮対象にするため)
+  ・`docs/poem-parity.md`の更新は**すべて既にpoem-cosmo-tauriと一字一句
+  一致した状態でこのリポジトリにコピー済み**であることを確認(差分ゼロ)。
+  つまり実質的な実装作業は前パスで終わっており、本パスは
+  **検証とcommit/pushだけが未完了だった**状態。
+  `cargo check --workspace`・`cargo test --workspace`
+  (全テストバイナリ、open-runo-router: 92テスト中
+  `compression_*`3本含む)がgreenであることを実際に確認。
+  **実バイナリ+curlでも独立に再検証**: `OPEN_RUNO_BIND_ADDR=
+  127.0.0.1:18322`で`cargo run -p open-runo-router`を起動し、
+  `GET /api/openapi.json`を(1)`Accept-Encoding`無しで叩くと
+  `content-length: 10265`の生JSON、(2)`Accept-Encoding: gzip`付きで
+  叩くと`content-encoding: gzip`+`content-length: 2115`(約79%削減、
+  poem-cosmo-tauri側で測定された数値と完全一致)、(3)`curl --compressed`
+  で自動デコードした結果が(1)のバイト列と`diff`で完全一致することを
+  確認(poem-cosmo-tauri側でも同一の3ステップを再現し同じ結果を得た)。
+  `git status`はclean化のうえcommit・push(コミットハッシュは次回HANDOFF
+  更新時に追記)。brotliは意図的に見送り(pure-Rustの低リスクな
+  brotliエンコーダcrateが無いため、gzip-onlyが今回の実用的な第一歩という
+  判断、`docs/poem-parity.md`3節に記載済み)。
+  次回パスがすべきこと: (1) `docs/cosmo-parity.md`4a節・
+  `docs/poem-parity.md`3節の残りのギャップ(汎用WebSocket対応・
+  EDFS/Kafka連携・gRPC Connect対応・MCP Server統合)から次の実用性向上
+  タスクを選ぶ、(2) brotli対応が必要になった場合はpure-Rustの低リスクな
+  エンコーダcrateが登場していないか確認、(3) 全体`cargo check
+  --workspace` / `cargo test --workspace`を定期的に確認しつつ両
+  リポジトリへのミラー・pushを継続(ユーザー指示により確認不要で
+  自動継続)。
+
 - **2026-07-11 未検証だった作業途中コードの検証・完成 + Feature Flags
   REST API実装(docs/cosmo-parity.md 4a、★★☆ギャップを解消) —
   両リポジトリ4コミット**: セッション開始時点で両リポジトリに未コミット

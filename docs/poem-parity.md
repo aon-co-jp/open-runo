@@ -37,7 +37,7 @@
 | テストユーティリティ | `hyper_compat::serve` + `reqwest`(実HTTP経由) | ✅ 実装済み(TestClientの代替) |
 | OpenAPI 3.0仕様生成 | `crates/open-runo-router/src/openapi.rs`(手書き静的JSON、`GET /api/openapi.json`) | ✅ 実装済み(2026-07-11追加。macro自動生成ではなく手書き) |
 | WebSocket(汎用) | ― | ❌ 未実装(SSEのみ。GraphQL Subscriptionsはpoem版`graphql_route`に限定) |
-| gzip/br圧縮 | ― | ❌ 未実装 |
+| ~~gzip/br圧縮~~ | `middleware_hyper::with_compression`(gzip、`flate2`使用) | ✅ 完了(2026-07-11、gzipのみ・brは見送り。理由は3節参照) |
 | Multipart(ファイルアップロード) | ― | ❌ 未実装(現状ファイルアップロードを要する機能なし) |
 | Cookie/セッション管理 | ― | ❌ 未実装(X-Api-Keyヘッダのみ、Cookie不使用の設計方針) |
 | CSRF保護 | ― | N/A(ブラウザセッションCookieを使わないAPI設計のため該当なし) |
@@ -49,7 +49,7 @@
 
 | 項目 | 優先度 | 理由 |
 |------|--------|------|
-| gzip/br圧縮ミドルウェア | ★★☆ | 本番運用のパフォーマンス向上に直結。レスポンスサイズが大きいエンドポイント(schema history等)で効果大 |
+| ~~gzip/br圧縮ミドルウェア~~ | ★★☆ | ✅ 完了(2026-07-11)。本番運用のパフォーマンス向上に直結。`GET /api/openapi.json`で実測10265→2115バイト(約79%削減)を確認 |
 | 汎用WebSocket対応 | ★★☆ | GraphQL Subscriptions以外の用途(リアルタイム管理UI等)を将来検討する場合に必要 |
 | Multipart/ファイルアップロード | ★☆☆ | 現状のAPI設計では不要(スキーマはSDL文字列、バックアップはJSON)。将来ファイル添付機能が必要になれば実装 |
 | Cookie/セッション | ★☆☆ | API-Key/JWT/OIDCベースの認証方針と方向性が異なるため、意図的に見送り |
@@ -60,5 +60,5 @@
 hyper_compatはPoemの**コア機能(ルーティング・エクストラクタ・レスポンス・
 ミドルウェア・SSE・静的配信・テスト)を実用上必要十分にカバー**している。
 未実装は主に「Poemのfeature flagでオプトインする周辺機能」であり、現状の
-REST/GraphQL API提供という用途では致命的な欠落はない。最も実用価値が
-高いのはgzip圧縮で、次点で汎用WebSocket対応。
+REST/GraphQL API提供という用途では致命的な欠落はない。
+gzip圧縮は2026-07-11に実装完了、次点で実用価値が高いのは汎用WebSocket対応。

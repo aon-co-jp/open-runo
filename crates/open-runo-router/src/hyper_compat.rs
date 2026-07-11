@@ -41,7 +41,11 @@ impl Params {
     }
 }
 
-fn fixed_body(bytes: Bytes) -> Body {
+/// Wrap raw bytes as a fixed (non-streaming) [`Body`]. `pub` so other
+/// modules (e.g. `middleware_hyper::with_compression`, which needs to
+/// substitute a gzip-compressed byte buffer for an existing response body)
+/// can build a `Body` without duplicating the `Full`/`boxed()` plumbing.
+pub fn fixed_body(bytes: Bytes) -> Body {
     Full::new(bytes).map_err(|never| match never {}).boxed()
 }
 

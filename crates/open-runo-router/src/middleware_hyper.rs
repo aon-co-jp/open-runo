@@ -3,12 +3,88 @@
 //! out" composition — see `hyper_compat.rs` module doc), rather than
 //! reimplementing `poem::Middleware`/`Endpoint` traits.
 
-use crate::hyper_compat::{empty_status, json_response, Handler, Response};
+use crate::hyper_compat::{empty_status, fixed_body, json_response, Handler, Response};
+use flate2::write::GzEncoder;
+use flate2::Compression;
+use http_body_util::BodyExt;
 use hyper::StatusCode;
 use open_runo_api_types::RateLimitedResponse;
 use open_runo_security::RateLimiter;
 use std::env;
+use std::io::Write;
 use std::sync::Arc;
+
+/// Minimum response body size (in bytes) before we bother gzip-compressing
+/// it. Small bodies (typical JSON error/status payloads) don't shrink
+/// meaningfully after gzip's fixed framing overhead, so compressing them
+/// just burns CPU for no benefit. Chosen pragmatically, not from a spec.
+const COMPRESSION_MIN_SIZE: usize = 512;
+
+/// Wrap `inner` so responses are gzip-compressed when the client sent
+/// `Accept-Encoding: gzip` and the body is large enough to be worth it
+/// (see [`COMPRESSION_MIN_SIZE`]). Poem-free port of Poem's `Compression`
+/// middleware — gzip only for this first pass (see `with_compression`'s
+/// doc for why brotli was left out).
+///
+/// Brotli tradeoff: Poem's `Compression` middleware also supports br/deflate
+/// via the `async-compression` crate. We deliberately did not add a brotli
+/// encoder here — the pure-Rust brotli encoder crates available (`brotli`,
+/// `brotlic`) either pull in a C build step or have much less mileage than
+/// `flate2`/zlib, and gzip alone already gets the bulk of the win for JSON
+/// API responses (both are well within gzip's sweet spot for text). If a
+/// pure-Rust, low-risk brotli encoder becomes available/needed later this
+/// can be added as a second candidate, negotiated the same way, without any
+/// dishonestly-quiet gzip removal.
+pub fn with_compression(inner: Handler) -> Handler {
+    Arc::new(move |req, params| {
+        let inner = Arc::clone(&inner);
+        let accepts_gzip = req
+            .headers()
+            .get(hyper::header::ACCEPT_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').any(|part| part.trim().starts_with("gzip")))
+            .unwrap_or(false);
+
+        Box::pin(async move {
+            let resp = inner(req, params).await;
+            if !accepts_gzip {
+                return resp;
+            }
+            // Never double-compress (e.g. a handler that already streams
+            // pre-encoded bytes, or a response some other middleware already
+            // compressed).
+            if resp.headers().contains_key(hyper::header::CONTENT_ENCODING) {
+                return resp;
+            }
+
+            let (mut parts, body) = resp.into_parts();
+            let collected = match body.collect().await {
+                Ok(collected) => collected.to_bytes(),
+                Err(never) => match never {},
+            };
+            if collected.len() < COMPRESSION_MIN_SIZE {
+                return Response::from_parts(parts, fixed_body(collected));
+            }
+
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            let compressed = match encoder.write_all(&collected).and_then(|_| encoder.finish()) {
+                Ok(compressed) => compressed,
+                // Should not happen for an in-memory Vec<u8> sink, but if it
+                // ever does, fail open with the original uncompressed body
+                // rather than dropping the response.
+                Err(_) => return Response::from_parts(parts, fixed_body(collected)),
+            };
+
+            parts.headers.insert(hyper::header::CONTENT_ENCODING, "gzip".parse().unwrap());
+            parts.headers.insert(
+                hyper::header::CONTENT_LENGTH,
+                compressed.len().to_string().parse().unwrap(),
+            );
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            Response::from_parts(parts, fixed_body(bytes::Bytes::from(compressed)))
+        })
+    })
+}
 
 /// Wrap `inner` so every response gets CORS headers, and `OPTIONS`
 /// preflight requests are answered directly without reaching `inner`.
@@ -155,6 +231,92 @@ mod tests {
 
     fn ok_handler() -> Handler {
         Arc::new(|_req, _params| Box::pin(async { empty_status(StatusCode::OK) }))
+    }
+
+    fn large_json_handler() -> Handler {
+        Arc::new(|_req, _params| {
+            Box::pin(async {
+                let long_string = "x".repeat(2000);
+                json_response(StatusCode::OK, &serde_json::json!({ "payload": long_string }))
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn compression_gzips_large_body_when_accepted() {
+        let router =
+            Router::new().route(Method::GET, "/x", with_compression(large_json_handler()));
+        let (addr, _handle) =
+            serve(router, "127.0.0.1:0".parse().unwrap()).await.expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/x"))
+            .header("accept-encoding", "gzip")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(
+            resp.headers().get("content-encoding").expect("content-encoding header").to_str().unwrap(),
+            "gzip"
+        );
+        let content_length: usize = resp
+            .headers()
+            .get("content-length")
+            .expect("content-length header")
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        // reqwest auto-decompresses if a `gzip` cargo feature were enabled,
+        // but this crate's dev-dependency reqwest doesn't enable it, so the
+        // raw (still-gzipped) bytes are what we get here.
+        let raw_body = resp.bytes().await.unwrap();
+        assert_eq!(raw_body.len(), content_length);
+        assert!(
+            raw_body.len() < 2000,
+            "gzip-compressed body ({} bytes) should be much smaller than the 2000+ byte original",
+            raw_body.len()
+        );
+
+        // Decompressing it should hand back the original JSON payload.
+        use std::io::Read;
+        let mut decoder = flate2::read::GzDecoder::new(&raw_body[..]);
+        let mut decoded = String::new();
+        decoder.read_to_string(&mut decoded).expect("valid gzip stream");
+        let value: serde_json::Value = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(value["payload"].as_str().unwrap().len(), 2000);
+    }
+
+    #[tokio::test]
+    async fn compression_is_skipped_without_accept_encoding() {
+        let router =
+            Router::new().route(Method::GET, "/x", with_compression(large_json_handler()));
+        let (addr, _handle) =
+            serve(router, "127.0.0.1:0".parse().unwrap()).await.expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/x"))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert!(resp.headers().get("content-encoding").is_none());
+        let body = resp.text().await.unwrap();
+        assert!(body.len() > 2000);
+    }
+
+    #[tokio::test]
+    async fn compression_skips_small_bodies_even_when_accepted() {
+        let router = Router::new().route(Method::GET, "/x", with_compression(ok_handler()));
+        let (addr, _handle) =
+            serve(router, "127.0.0.1:0".parse().unwrap()).await.expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/x"))
+            .header("accept-encoding", "gzip")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert!(resp.headers().get("content-encoding").is_none());
     }
 
     #[tokio::test]
