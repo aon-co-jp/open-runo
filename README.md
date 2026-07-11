@@ -13,7 +13,7 @@
 [![CI](https://github.com/aon-co-jp/open-runo/actions/workflows/ci.yml/badge.svg)](https://github.com/aon-co-jp/open-runo/actions/workflows/ci.yml)
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)
-![Tests](https://img.shields.io/badge/tests-210%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-289%20passed-brightgreen)
 
 📖 詳細: [日本語 README](README-Japan.md) / [English README](README-English.md) /
 [中文](README-Chinese.md) / [한국어](README-Korea.md) / [Español](README-Spain.md) /
@@ -77,8 +77,17 @@ tokio/hyper で自前実装しています。
   FederatedBackend で社内分散 DB を 1 つに統合運用(TOML 1 枚で
   members/routes/broadcast を宣言する設定ファイル読み込みにも対応)
 - ⚡ **VersionlessAPI** — `/v1 /v2` を作らない互換性ルールエンジン
+- 📎 **Multipart ファイルアップロード** — 手書き RFC 7578 パーサー、
+  `POST /api/schemas/upload` でSDLファイルを直接アップロード
+- 🍪 **Cookie/セッション + CSRF** — `X-Api-Key` に追加する認証経路、
+  `POST /api/session/login`/`logout`、CSRF二重送信トークン検証
+- 🔒 **TLS終端**(`tls` feature、rustls) — リバースプロキシ不要で
+  直接HTTPS配信可能
 - 🖥️ **デスクトップ管理アプリ**(Tauri非依存・互換UI、Rust→WebAssembly、
   Node.js/TypeScript ビルドチェーン不使用)
+- 🔔 **システムトレイ + ネイティブ通知 + ネイティブインストーラー**
+  (`apps/desktop-tray`、tauriパッケージ非依存。`tray-icon`+`tao`+
+  `notify-rust`、Windows向け実.exeインストーラー付き)
 - ⌨️ **CLI(`open-runo-cli`)** — wgc 相当のスキーマ登録/取得/履歴確認・
   federation status・OpenAPI スペック取得を CLI から実行、APIキーは
   未指定なら自動 self-issue
@@ -88,7 +97,7 @@ tokio/hyper で自前実装しています。
 ```bash
 git clone https://github.com/aon-co-jp/open-runo
 cd open-runo
-cargo test --workspace          # 210 テスト
+cargo test --workspace          # 286 テスト(--all-features で289)
 cargo run -p open-runo-gateway  # REST + GraphQL 統合サーバー起動(poem-free)
 ```
 

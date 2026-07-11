@@ -188,6 +188,22 @@ Federation Gateway/バックエンド側として関与しうる。
 
 ## HANDOFF(直近の自動実行パス)
 
+- **2026-07-12 Poem/Tauriパリティの残ギャップをpoem-cosmo-tauriからミラー
+  完了(Multipart・Cookie/セッション+CSRF・TLS・ネイティブ通知・
+  システムトレイ・ネイティブインストーラー)**: poem-cosmo-tauri側コミット
+  `401e9fe`(Multipart)・`2a999fb`(Cookie/セッション+CSRF)・`91c1c36`(TLS)・
+  `a5ad6ca`(Web Notifications)・`8392c8f`(apps/desktop-tray新設)を
+  こちらへ同期(`c72cf01`〜`0dffe6e`)。実装詳細・実機検証の記録は
+  poem-cosmo-tauri側CLAUDE.mdの同日エントリが正——このリポジトリ側でも
+  `cargo test --workspace`(286テスト)/`--all-features`(289テスト、tls
+  feature込み)がgreenであること、`apps/desktop-tray`が
+  `cargo build --release`で単独ビルドできることを個別に確認済み。
+  ユーザー指示により「未着手・意図的に先送り」は確認を求めず実装対象と
+  する運用ルールを明文化(全関連リポジトリのCLAUDE.mdに転記済み)。
+  次回パスがすべきこと: ACMEクライアント・gRPC・MCP Server(poem-parity
+  4a節参照)、Cookie/セッション認証の他ハンドラへの段階的拡大、
+  `apps/desktop-tray`のmacOS/Linuxパッケージング。
+
 - **2026-07-11 Federation v1/v2互換ギャップ解消をpoem-cosmo-tauriから
   ミラー完了(docs/cosmo-parity.md 4a節、★☆☆)**: poem-cosmo-tauri側
   コミット`b65013e`で実装・実バイナリ検証済みだった、SDLパーサー新設
