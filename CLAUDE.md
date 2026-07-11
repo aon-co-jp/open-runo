@@ -72,6 +72,16 @@ WEBアプリ開発を効率的に行えるようにするための**フレーム
 この節は [`open-raid-z`](https://github.com/aon-co-jp/open-raid-z) の
 `CLAUDE.md` を正本とし、各プロジェクトへコピーして同期する。
 
+## open-web-server 拡張要件との関わり(2026-07-11、ユーザー指示)
+
+`open-web-server` リポジトリが、poem-cosmo-tauri(またはこのリポジトリ)・
+PostgreSQL・`aruaru-db`・`open-raid-z`と組み合わせて、3Dオンラインゲームの
+課金アイテム・金融/証券データをネットワーク上で紛失しないための
+TCP-IP/UDP-IP三層三重通信・VersionLessAPIとGit管理のハイブリッド版管理を
+実装する目標アーキテクチャの詳細・進捗は `open-web-server/CLAUDE.md`
+(および正本の open-raid-z `CLAUDE.md`)を参照。このリポジトリはその
+Federation Gateway/バックエンド側として関与しうる。
+
 ## フロントエンド(2026-07-10、方針更新)
 
 - Tauriパッケージには直接依存しない。ただしTauriのデスクトップUI体験・
@@ -147,9 +157,17 @@ WEBアプリ開発を効率的に行えるようにするための**フレーム
 
 ## 現状(このリポジトリ固有)
 
-- `cargo check --workspace` / `cargo test --workspace --no-run` は成功する
-  (18クレート構成 — 2026-07-11に`open-runo-feature-flags`を追加、
-  テストコンパイル済み)。todo!()/unimplemented!()マーカーなし。
+- `cargo check --workspace` / `cargo test --workspace` は成功する
+  (18クレート構成。2026-07-11時点で`cargo test --workspace`実測
+  262テストpassed、failed 0)。todo!()/unimplemented!()マーカーなし。
+- 直近パスで追加された機能(poem-cosmo-tauriからミラー): Feature
+  Flags REST API + WASM管理画面(`open-runo-feature-flags`)、
+  gzipレスポンス圧縮ミドルウェア、汎用WebSocket対応(手書きRFC 6455、
+  `GET /api/ws-echo` / `GET /api/ws-events`)、Federation v1/v2
+  SDLパーサー(`open-runo-federation::sdl`、`POST
+  /api/federation/compose`の`sdl`フィールド)、DB REST型集約
+  (`open-runo-api-types`への統合、`table`フィールド欠落バグ修正)、
+  `open-runo-cli`の`db`サブコマンド。
 - README多言語版は `README-<言語>.md` 形式で日本語・英語・中国語簡体字・
   韓国語・スペイン語・フランス語・ドイツ語・イタリア語・ロシア語・
   アラビア語の10言語が揃っている。
