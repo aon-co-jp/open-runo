@@ -4,9 +4,9 @@
 > open-e-gov / OpenRedmine / OpenWordPress など新プロジェクトのリポジトリに
 > このファイルをコピーして、上から順に進めてください。
 >
-> 対象バージョン: workspace 0.1.0（15 クレート / 192 テスト、本文の詳細は
-> 2026-07-04 時点。最新のクレート数・テスト数は `CLAUDE.md` の「現状」節参照）
-> 最終更新: 2026-07-04
+> 対象バージョン: workspace 0.1.0（18 クレート / 262 テスト、2026-07-11
+> 実測。最新のクレート数・テスト数は `CLAUDE.md` の「現状」節参照）
+> 最終更新: 2026-07-11
 
 ---
 
@@ -44,7 +44,7 @@ WunderGraph Cosmo の有料版（Launch / Scale / Enterprise）機能を OSS で
 ```
 open-runo/
 ├── Cargo.toml / Cargo.lock      ← workspace 定義（バージョン固定）
-├── crates/                      ← 15 クレート（本体）
+├── crates/                      ← 18 クレート（本体）
 ├── apps/desktop-wasm/            ← Rust→WebAssembly 管理アプリ（任意、open-runo-routerが自前配信）
 ├── docs/                        ← 設計・API 仕様・migration.md ほか
 ├── .github/workflows/ci.yml     ← fmt / clippy -D warnings / test
@@ -53,7 +53,7 @@ open-runo/
 ```
 
 丸ごと移設する場合はフォルダごとコピーして `cargo test --workspace`
-（192 テストが通れば移設成功）。以下はライブラリとして使う場合です。
+（262 テストが通れば移設成功）。以下はライブラリとして使う場合です。
 
 ## 3. 依存の書き方（新プロジェクトの Cargo.toml）
 
@@ -234,11 +234,19 @@ curl -X POST -H "x-api-key: $KEY" http://new:8080/api/backup/restore-latest
 | `/api/db/*` | DUAL DATABASE KV |
 | `/api/ai/route` | AI プロバイダ選択 |
 | `/api/events` | SSE |
+| `/api/ws-echo` | 汎用 WebSocket エコー（手書き RFC 6455、認証不要） |
+| `/api/ws-events` | 汎用 WebSocket イベント配信（認証必須、SSE と同じブローカー） |
+| `/api/feature-flags*` `/api/feature-flags/:name` `/api/feature-flags/:name/evaluate` | Feature Flags（upsert/list/get/delete/evaluate、決定的バケッティングによる canary ロールアウト） |
 | `/scim/v2/Users` `/scim/v2/Groups` | SCIM 2.0（鍵の自動発行/失効つき） |
 | `/api/cache/purge` `/purge-all` `/ai-stats` | HTML キャッシュ管理・AI 観測 |
 | `/api/backup/export` `/import` `/restore-latest` | バックアップ・復活 |
 | `/api/migrate/export-sql` `/export-csv` | エンジン変換エクスポート |
 | `/api/integrity/check` | 両 DB 整合性チェック・自動修復 |
+
+Federation合成（`POST /api/federation/compose`）は`sdl`フィールドで生の
+GraphQL SDL（Federation v1の暗黙ディレクティブ方式・v2の`@link`方式
+どちらも自動判別）を渡せます。従来の`{service_name, types: {...}}`
+JSON直接指定も後方互換のためそのまま利用可能です。
 
 認証: `X-Api-Key`（KeyGuardian 台帳が空なら開発モードで任意値可）/
 JWT / OIDC Bearer。RBAC 有効時、管理系は `admin` ロール必須。
@@ -247,7 +255,7 @@ JWT / OIDC Bearer。RBAC 有効時、管理系は `admin` ロール必須。
 
 ```bash
 cd open-runo
-cargo test --workspace     # 192 テスト + doctest が全部通れば OK
+cargo test --workspace     # 262 テスト + doctest が全部通れば OK
 cargo run -p open-runo-gateway   # REST + GraphQL 統合バイナリ起動
 ```
 
