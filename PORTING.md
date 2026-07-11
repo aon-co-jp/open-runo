@@ -1,17 +1,33 @@
-# PORTING.md — poem-cosmo-tauri お引越しファイル
+# PORTING.md — open-runo お引越しファイル
 
-> このファイル 1 枚で、**どのプロジェクトでも poem-cosmo-tauri を導入・移設**できます。
+> このファイル 1 枚で、**どのプロジェクトでも open-runo を導入・移設**できます。
 > open-e-gov / OpenRedmine / OpenWordPress など新プロジェクトのリポジトリに
 > このファイルをコピーして、上から順に進めてください。
 >
-> 対象バージョン: workspace 0.1.0（15 クレート / 192 テスト）
+> 対象バージョン: workspace 0.1.0（15 クレート / 192 テスト、本文の詳細は
+> 2026-07-04 時点。最新のクレート数・テスト数は `CLAUDE.md` の「現状」節参照）
 > 最終更新: 2026-07-04
 
 ---
 
-## 1. open-runo とは（30 秒版）
+## 0. open-runo と poem-cosmo-tauri の違い(2026-07-11、ユーザーによる最終定義)
 
-Rust + Poem 製の **GraphQL Federation プラットフォーム / Web フレームワーク**。
+このリポジトリ `open-runo` は、姉妹リポジトリ `poem-cosmo-tauri`
+(https://github.com/aon-co-jp/poem-cosmo-tauri) と共通コア(下記「cosmo
+部分」)を持つが、**全く違うリポジトリのプロジェクト**であり統合対象では
+ない。poem-cosmo-tauri はこの共通コアに加えて、(1) Rust の Poem
+フレームワークの全機能を完全互換で一から自作・再現したバックエンド、
+(2) Tauri の全機能を完全互換で一から自作・再現したフロントエンド、を
+持ち、その2つとcosmoコアの3者をスムーズに連携させることで効率的な
+WEB開発を実現するフレームワーク/ミドルウェアという、より広いスコープを
+持つ。**このリポジトリ(open-runo)にその上乗せスコープはなく、以下の
+cosmo部分が中心**。詳細は `CLAUDE.md` の該当節、または open-raid-z の
+`CLAUDE.md`(正本)を参照。
+
+## 1. open-runo とは（cosmo部分、30 秒版）
+
+Rust + tokio/hyper 製（`poem`パッケージには依存しない）の
+**GraphQL Federation プラットフォーム / Web フレームワーク**。
 WunderGraph Cosmo の有料版（Launch / Scale / Enterprise）機能を OSS で提供し、
 さらに独自の自己学習 AI（外部 LLM 契約不要）を搭載します。
 
