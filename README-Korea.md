@@ -53,6 +53,16 @@ cargo run -p open-runo-gateway  # REST + GraphQL 서버 실행
 `open-runo-federation`(스키마 합성), `open-runo-db`(멀티 엔진 DB 추상화) 등으로 구성됩니다.
 자세한 내용은 [docs/architecture.md](docs/architecture.md) 참고.
 
+## 관련 프로젝트
+
+`open-web-server`를 중심으로 이 저장소·`poem-cosmo-tauri`·PostgreSQL·
+`aruaru-db`·`open-raid-z`를 결합한 목표 아키텍처(통신·DB 쓰기 4중화,
+2026-07-11 개정)가 있으며, 3D 온라인 게임의 유료 아이템 및 금융/증권
+데이터 손실을 방지하는 것이 목적이다. open-runo는 그 안에서 Federation
+Gateway/백엔드로 관여할 수 있다(자세한 내용은
+[open-web-server](https://github.com/aon-co-jp/open-web-server)의
+`README.md`/`CLAUDE.md` 참조).
+
 ## License
 
 Apache-2.0 OR MIT(원하는 쪽 선택). 기여는 [CONTRIBUTING.md](CONTRIBUTING.md) 참고.

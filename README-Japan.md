@@ -151,6 +151,16 @@ feature フラグで選択。「マネージド版でしか使えない機能」
 [docs/security.md](docs/security.md) — セキュリティ ·
 [docs/HANDOFF.md](docs/HANDOFF.md) — 開発履歴
 
+## 関連プロジェクト
+
+`open-web-server` を中心に、このリポジトリ・`poem-cosmo-tauri`・
+PostgreSQL・`aruaru-db`・`open-raid-z` を組み合わせ、3Dオンラインゲームの
+課金アイテム・金融/証券データをネットワーク上で紛失させないための
+目標アーキテクチャ(通信層四重化・DB書き込み四重化、2026-07-11改訂)が
+ある。open-runo は Federation Gateway/バックエンド側として関与しうる
+(詳細は [open-web-server](https://github.com/aon-co-jp/open-web-server) の
+`README.md`/`CLAUDE.md` を参照)。
+
 ## License
 
 Apache-2.0 OR MIT（お好きな方でどうぞ）。

@@ -57,6 +57,16 @@ cargo run -p open-runo-gateway  # сервер REST + GraphQL
 `open-runo-gateway` (GraphQL-эндпоинт), `open-runo-federation` (композиция схем),
 `open-runo-db` (абстракция над несколькими движками БД) и др. Подробнее: [docs/architecture.md](docs/architecture.md).
 
+## Связанные проекты
+
+Существует целевая архитектура, объединяющая `open-web-server` с этим
+репозиторием, `poem-cosmo-tauri`, PostgreSQL, `aruaru-db` и `open-raid-z`
+(четырёхкратно резервированный транспорт и запись в БД, пересмотрено
+2026-07-11), призванная предотвратить потерю данных платных предметов и
+финансовых/биржевых данных в 3D онлайн-играх. Подробности см. в
+`README.md`/`CLAUDE.md` проекта
+[open-web-server](https://github.com/aon-co-jp/open-web-server).
+
 ## Лицензия
 
 Apache-2.0 OR MIT (на выбор). Как внести вклад — см. [CONTRIBUTING.md](CONTRIBUTING.md).

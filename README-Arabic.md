@@ -55,6 +55,15 @@ cargo run -p open-runo-gateway  # تشغيل خادم REST + GraphQL
 `open-runo-gateway` (نقطة نهاية GraphQL)، `open-runo-federation` (تركيب المخططات)،
 `open-runo-db` (تجريد متعدد المحركات)، وغيرها. التفاصيل: [docs/architecture.md](docs/architecture.md).
 
+## مشاريع ذات صلة
+
+توجد بنية مستهدفة تجمع بين `open-web-server` وهذا المستودع و
+`poem-cosmo-tauri` و PostgreSQL و `aruaru-db` و `open-raid-z` (نقل
+وكتابة قاعدة بيانات رباعية التكرار، مُنقّح 2026-07-11)، مصممة لمنع فقدان
+بيانات العناصر المدفوعة والبيانات المالية/الأوراق المالية في ألعاب
+الأونلاين ثلاثية الأبعاد. التفاصيل في `README.md`/`CLAUDE.md` الخاصين بـ
+[open-web-server](https://github.com/aon-co-jp/open-web-server).
+
 ## الترخيص
 
 Apache-2.0 OR MIT (اختر ما يناسبك). للمساهمة راجع [CONTRIBUTING.md](CONTRIBUTING.md).

@@ -56,6 +56,16 @@ Compuesto por `open-runo-router` (gateway REST/auth/auditoría),
 `open-runo-gateway` (endpoint GraphQL), `open-runo-federation` (composición de esquemas),
 `open-runo-db` (abstracción multi-motor), etc. Ver [docs/architecture.md](docs/architecture.md).
 
+## Proyectos relacionados
+
+Existe una arquitectura objetivo que combina `open-web-server` con este
+repositorio, `poem-cosmo-tauri`, PostgreSQL, `aruaru-db` y `open-raid-z`
+(transporte y escrituras de BD con redundancia cuádruple, revisado
+2026-07-11) para evitar la pérdida de datos de objetos de pago y datos
+financieros/bursátiles en juegos online 3D. Ver `README.md`/`CLAUDE.md` de
+[open-web-server](https://github.com/aon-co-jp/open-web-server) para más
+detalles.
+
 ## Licencia
 
 Apache-2.0 OR MIT (a elección). Para contribuir, ver [CONTRIBUTING.md](CONTRIBUTING.md).
