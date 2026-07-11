@@ -46,7 +46,7 @@ Les fonctionnalités que WunderGraph Cosmo (Go) réserve à ses offres payantes
 ```bash
 git clone https://github.com/aon-co-jp/open-runo
 cd open-runo
-cargo test --workspace          # 286 tests (289 with --all-features)
+cargo test --workspace          # 302 tests (311 with --all-features)
 cargo run -p open-runo-gateway  # serveur REST + GraphQL
 ```
 

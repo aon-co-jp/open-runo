@@ -188,6 +188,21 @@ Federation Gateway/バックエンド側として関与しうる。
 
 ## HANDOFF(直近の自動実行パス)
 
+- **2026-07-12 `docs/poem-parity.md`4a節の残りギャップ(ACME・gRPC・
+  MCP Server)をpoem-cosmo-tauriからミラー完了——これで同ドキュメントの
+  未実装項目はゼロに**: poem-cosmo-tauri側コミット`a10a4cf`(ACME、
+  RFC 8555 HTTP-01のみ、`ring`のES256 JWS署名+モックCAサーバーとの実
+  ラウンドトリップテスト)・`a5d3643`(gRPC、`grpc.health.v1.Health/Check`、
+  新規依存無し、`OPEN_RUNO_GRPC_BIND_ADDR`で有効化)・`8e9ef94`(MCP
+  Server、`POST /mcp`、JSON-RPC 2.0、`health_check`/`self_issue_api_key`
+  の2実ツール)をこちらへ同期(`e66df73`〜`eb08c98`)。実装詳細・実機検証の
+  記録はpoem-cosmo-tauri側CLAUDE.mdの同日エントリが正——このリポジトリ
+  側でも`cargo test --workspace`(302テスト)/`--all-features`(311
+  テスト、tls/acme feature込み)がgreenであることを個別に確認済み。
+  次回パスがすべきこと: 各機能の対応範囲拡大(gRPCの他サービス・
+  ストリーミング、MCPのResources/Prompts、DNS-01/TLS-ALPN-01チャレンジ、
+  Cookie/セッション認証の他ハンドラへの段階的拡大)。急ぎではない。
+
 - **2026-07-12 Poem/Tauriパリティの残ギャップをpoem-cosmo-tauriからミラー
   完了(Multipart・Cookie/セッション+CSRF・TLS・ネイティブ通知・
   システムトレイ・ネイティブインストーラー)**: poem-cosmo-tauri側コミット
