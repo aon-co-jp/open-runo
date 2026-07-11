@@ -77,8 +77,11 @@ WEBアプリ開発を効率的に行えるようにするための**フレーム
 `open-web-server` リポジトリが、poem-cosmo-tauri(またはこのリポジトリ)・
 PostgreSQL・`aruaru-db`・`open-raid-z`と組み合わせて、3Dオンラインゲームの
 課金アイテム・金融/証券データをネットワーク上で紛失しないための
-TCP-IP/UDP-IP三層三重通信・VersionLessAPIとGit管理のハイブリッド版管理を
-実装する目標アーキテクチャの詳細・進捗は `open-web-server/CLAUDE.md`
+通信層の四重化(TCP-IP・UDP-IP・QUIC/MPQUIC・MPTCP/SCTP、2026-07-11に
+三層三重から改訂)・DB書き込みの四重化(PostgreSQL・aruaru-db・マルチ
+リージョン同期レプリケーション・独立監査ログ)・VersionLessAPIとGit管理の
+ハイブリッド版管理を実装する目標アーキテクチャの詳細・進捗は
+`open-web-server/CLAUDE.md`
 (および正本の open-raid-z `CLAUDE.md`)を参照。このリポジトリはその
 Federation Gateway/バックエンド側として関与しうる。
 
