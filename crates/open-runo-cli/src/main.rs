@@ -17,7 +17,8 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use open_runo_api_types::{
-    FederationStatusResponse, RateLimitedResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
+    DbDeleteResponse, DbRecordListResponse, DbRecordResponse, DbUpsertRequest, FederationStatusResponse,
+    RateLimitedResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
 };
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -63,6 +64,44 @@ enum Command {
     Openapi,
     /// Self-issue a fresh developer API key and print it (no other action).
     Login,
+    /// DUAL DATABASE key/value operations.
+    Db {
+        #[command(subcommand)]
+        action: DbCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DbCommand {
+    /// List every record in a table.
+    List {
+        #[arg(long)]
+        table: String,
+    },
+    /// Fetch a single record by key.
+    Get {
+        #[arg(long)]
+        table: String,
+        #[arg(long)]
+        key: String,
+    },
+    /// Insert or update a record.
+    Put {
+        #[arg(long)]
+        table: String,
+        #[arg(long)]
+        key: String,
+        /// JSON value to store.
+        #[arg(long)]
+        value: String,
+    },
+    /// Delete a record by key.
+    Delete {
+        #[arg(long)]
+        table: String,
+        #[arg(long)]
+        key: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -156,6 +195,30 @@ async fn main() -> Result<()> {
                     &[("namespace", namespace.as_deref())],
                 );
                 let resp: SchemaHistoryResponse = get(&client, &cli.base_url, &api_key, &path).await?;
+                serde_json::to_value(resp)?
+            }
+        },
+        Command::Db { action } => match action {
+            DbCommand::List { table } => {
+                let resp: DbRecordListResponse =
+                    get(&client, &cli.base_url, &api_key, &format!("/api/db/{table}")).await?;
+                serde_json::to_value(resp)?
+            }
+            DbCommand::Get { table, key } => {
+                let resp: DbRecordResponse =
+                    get(&client, &cli.base_url, &api_key, &format!("/api/db/{table}/{key}")).await?;
+                serde_json::to_value(resp)?
+            }
+            DbCommand::Put { table, key, value } => {
+                let value: Value = serde_json::from_str(value).context("--value must be valid JSON")?;
+                let payload = DbUpsertRequest { value };
+                let resp: DbRecordResponse =
+                    put(&client, &cli.base_url, &api_key, &format!("/api/db/{table}/{key}"), &payload).await?;
+                serde_json::to_value(resp)?
+            }
+            DbCommand::Delete { table, key } => {
+                let resp: DbDeleteResponse =
+                    delete(&client, &cli.base_url, &api_key, &format!("/api/db/{table}/{key}")).await?;
                 serde_json::to_value(resp)?
             }
         },
@@ -283,6 +346,33 @@ async fn post<Req: serde::Serialize, T: DeserializeOwned>(
     decode(resp).await
 }
 
+async fn put<Req: serde::Serialize, T: DeserializeOwned>(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    path: &str,
+    payload: &Req,
+) -> Result<T> {
+    let resp = client
+        .put(format!("{base_url}{path}"))
+        .header("X-Api-Key", api_key)
+        .json(payload)
+        .send()
+        .await
+        .with_context(|| format!("PUT {base_url}{path}"))?;
+    decode(resp).await
+}
+
+async fn delete<T: DeserializeOwned>(client: &reqwest::Client, base_url: &str, api_key: &str, path: &str) -> Result<T> {
+    let resp = client
+        .delete(format!("{base_url}{path}"))
+        .header("X-Api-Key", api_key)
+        .send()
+        .await
+        .with_context(|| format!("DELETE {base_url}{path}"))?;
+    decode(resp).await
+}
+
 /// Check a response's status and return its JSON body. Non-2xx errors
 /// include the server's `X-Request-Id` (see
 /// `open_runo_router::middleware_hyper::with_tracing`) so a user can hand
@@ -352,6 +442,36 @@ fn print_human(command: &Command, body: &Value) {
             }
             SchemaCommand::Register { .. } | SchemaCommand::Get { .. } => {
                 print_schema_version(body);
+            }
+        },
+        Command::Db { action } => match action {
+            DbCommand::List { .. } => {
+                let table = body.get("table").and_then(Value::as_str).unwrap_or("?");
+                let records = body.get("records").and_then(Value::as_array).cloned().unwrap_or_default();
+                println!("{} record(s) in {table}:", records.len());
+                for r in records {
+                    println!(
+                        "  {}: {}",
+                        r.get("key").and_then(Value::as_str).unwrap_or("?"),
+                        r.get("value").cloned().unwrap_or(Value::Null)
+                    );
+                }
+            }
+            DbCommand::Get { .. } | DbCommand::Put { .. } => {
+                println!(
+                    "{}/{}: {}",
+                    body.get("table").and_then(Value::as_str).unwrap_or("?"),
+                    body.get("key").and_then(Value::as_str).unwrap_or("?"),
+                    body.get("value").cloned().unwrap_or(Value::Null)
+                );
+            }
+            DbCommand::Delete { .. } => {
+                println!(
+                    "deleted {}/{}: {}",
+                    body.get("table").and_then(Value::as_str).unwrap_or("?"),
+                    body.get("key").and_then(Value::as_str).unwrap_or("?"),
+                    body.get("deleted").and_then(Value::as_bool).unwrap_or(false)
+                );
             }
         },
     }

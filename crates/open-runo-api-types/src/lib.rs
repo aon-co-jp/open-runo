@@ -83,6 +83,69 @@ pub struct RateLimitedResponse {
     pub retry_after_secs: i64,
 }
 
+/// A single key/value record, as returned within
+/// `DbRecordListResponse::records` by `GET /api/db/:table`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbRecordItem {
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+/// Response body for `GET /api/db/:table`. Found drifted the same way
+/// `SchemaVersion` was (see this crate's top-level doc): the WASM
+/// frontend's independent copy of this shape omitted `table` entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbRecordListResponse {
+    pub table: String,
+    pub count: usize,
+    pub records: Vec<DbRecordItem>,
+}
+
+/// Response body for `GET /api/db/:table/:key`. Same `table`-omission
+/// drift as `DbRecordListResponse` existed in the frontend's copy before
+/// this crate.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbRecordResponse {
+    pub table: String,
+    pub key: String,
+    pub value: serde_json::Value,
+}
+
+/// Request body for `PUT /api/db/:table/:key`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbUpsertRequest {
+    pub value: serde_json::Value,
+}
+
+/// Response body for `DELETE /api/db/:table/:key`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbDeleteResponse {
+    pub table: String,
+    pub key: String,
+    pub deleted: bool,
+}
+
+/// Response body for `GET /api/db/status`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbStatusResponse {
+    pub backend: String,
+    pub status: String,
+}
+
+/// One entry in `DbRoutingInfo::entries`, as returned by `GET /api/db/routing`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbRoutingEntry {
+    pub table: String,
+    pub target: String,
+}
+
+/// Response body for `GET /api/db/routing`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct DbRoutingInfo {
+    pub default_target: String,
+    pub entries: Vec<DbRoutingEntry>,
+}
+
 /// Request body for `POST /api/feature-flags` (create-or-update, upsert
 /// semantics keyed by `name`).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -169,6 +232,35 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let back: RateLimitedResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(back.retry_after_secs, 42);
+    }
+
+    #[test]
+    fn db_record_list_response_includes_table() {
+        // This is exactly the field the WASM frontend's independent copy
+        // of this shape used to silently drop.
+        let json = r#"{"table": "users", "count": 1, "records": [{"key": "1", "value": {"name": "a"}}]}"#;
+        let resp: DbRecordListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.table, "users");
+        assert_eq!(resp.records[0].key, "1");
+    }
+
+    #[test]
+    fn db_record_response_includes_table() {
+        let json = r#"{"table": "users", "key": "1", "value": "hello"}"#;
+        let resp: DbRecordResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.table, "users");
+        assert_eq!(resp.value, serde_json::json!("hello"));
+    }
+
+    #[test]
+    fn db_routing_info_roundtrips_through_json() {
+        let info = DbRoutingInfo {
+            default_target: "postgresql".to_string(),
+            entries: vec![DbRoutingEntry { table: "sessions".to_string(), target: "postgresql".to_string() }],
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: DbRoutingInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries[0].table, "sessions");
     }
 
     #[test]

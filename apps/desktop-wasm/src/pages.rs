@@ -340,7 +340,7 @@ fn render_db() {
             let key = input_value("db-key");
             set_text("db-record-result", "loading…");
             match api::db_get(&table, &key).await {
-                Ok(r) => set_text("db-record-result", &format!("{}: {}", r.key, r.value)),
+                Ok(r) => set_text("db-record-result", &format!("{}/{}: {}", r.table, r.key, r.value)),
                 Err(e) => set_text("db-record-result", &format!("failed: {e}")),
             }
         });
@@ -354,7 +354,7 @@ fn render_db() {
             let value = textarea_value("db-value");
             set_text("db-record-result", "saving…");
             match api::db_put(&table, &key, &value).await {
-                Ok(r) => set_text("db-record-result", &format!("saved {}: {}", r.key, r.value)),
+                Ok(r) => set_text("db-record-result", &format!("saved {}/{}: {}", r.table, r.key, r.value)),
                 Err(e) => set_text("db-record-result", &format!("failed: {e}")),
             }
             set_disabled("db-put-btn", false);

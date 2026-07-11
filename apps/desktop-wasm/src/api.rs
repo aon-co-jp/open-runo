@@ -7,7 +7,8 @@
 //! same `open-runo-router` binary, so this is a same-origin call.
 
 use open_runo_api_types::{
-    FederationStatusResponse, RateLimitedResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
+    DbRecordListResponse, DbRecordResponse, DbUpsertRequest, FederationStatusResponse, RateLimitedResponse,
+    RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -243,28 +244,10 @@ pub async fn ai_route(
     post_json("/api/ai/route", &AiRouteRequest { policy, candidates }).await
 }
 
-#[derive(Debug, Deserialize)]
-pub struct DbRecordItem {
-    pub key: String,
-    pub value: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DbRecordListResponse {
-    pub count: usize,
-    pub records: Vec<DbRecordItem>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DbRecordResponse {
-    pub key: String,
-    pub value: serde_json::Value,
-}
-
-#[derive(Debug, Serialize)]
-struct DbUpsertRequest<'a> {
-    value: &'a serde_json::Value,
-}
+// DbRecordListResponse/DbRecordResponse/DbUpsertRequest now live in
+// open_runo_api_types (imported above) -- the frontend's previous copies
+// of the response types both silently omitted the `table` field the
+// router actually sends (see CLAUDE.md HANDOFF, 2026-07-11).
 
 pub async fn db_list(table: &str) -> Result<DbRecordListResponse, String> {
     get_json(&format!("/api/db/{table}")).await
@@ -277,7 +260,7 @@ pub async fn db_get(table: &str, key: &str) -> Result<DbRecordResponse, String> 
 pub async fn db_put(table: &str, key: &str, value_json: &str) -> Result<DbRecordResponse, String> {
     let value: serde_json::Value =
         serde_json::from_str(value_json).map_err(|e| format!("invalid JSON value: {e}"))?;
-    let body = serde_json::to_string(&DbUpsertRequest { value: &value })
+    let body = serde_json::to_string(&DbUpsertRequest { value })
         .map_err(|e| format!("encode error: {e}"))?;
     let json = send("PUT", &format!("/api/db/{table}/{key}"), Some(&body)).await?;
     serde_wasm_bindgen::from_value(json).map_err(|e| format!("decode error: {e}"))
