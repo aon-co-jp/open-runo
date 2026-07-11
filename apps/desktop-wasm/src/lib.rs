@@ -14,6 +14,7 @@
 use wasm_bindgen::prelude::*;
 
 mod api;
+mod notifications;
 mod pages;
 
 #[wasm_bindgen(start)]

@@ -742,8 +742,14 @@ fn render_cache_backup() {
         wasm_bindgen_futures::spawn_local(async move {
             set_text("cache-result", "purging all…");
             match api::cache_purge_all().await {
-                Ok(r) => set_text("cache-result", &format!("purged: {}", r.purged)),
-                Err(e) => set_text("cache-result", &format!("failed: {e}")),
+                Ok(r) => {
+                    set_text("cache-result", &format!("purged: {}", r.purged));
+                    crate::notifications::notify("Cache purge complete", &format!("purged: {}", r.purged));
+                }
+                Err(e) => {
+                    set_text("cache-result", &format!("failed: {e}"));
+                    crate::notifications::notify("Cache purge failed", &e);
+                }
             }
             set_disabled("cache-purge-all-btn", false);
         });
@@ -769,11 +775,18 @@ fn render_cache_backup() {
         wasm_bindgen_futures::spawn_local(async move {
             set_text("backup-result", "exporting…");
             match api::backup_export().await {
-                Ok(r) => set_text(
-                    "backup-result",
-                    &format!("records={}\nwritten:\n{}", r.records, r.written.join("\n")),
-                ),
-                Err(e) => set_text("backup-result", &format!("failed: {e}")),
+                Ok(r) => {
+                    let summary = format!("records={}\nwritten:\n{}", r.records, r.written.join("\n"));
+                    set_text("backup-result", &summary);
+                    crate::notifications::notify(
+                        "Backup export complete",
+                        &format!("{} record(s) exported", r.records),
+                    );
+                }
+                Err(e) => {
+                    set_text("backup-result", &format!("failed: {e}"));
+                    crate::notifications::notify("Backup export failed", &e);
+                }
             }
         });
     });
@@ -782,8 +795,17 @@ fn render_cache_backup() {
         wasm_bindgen_futures::spawn_local(async move {
             set_text("backup-result", "checking…");
             match api::integrity_check().await {
-                Ok(r) => set_text("backup-result", &format!("backend={} healed={}", r.backend, r.healed)),
-                Err(e) => set_text("backup-result", &format!("failed: {e}")),
+                Ok(r) => {
+                    set_text("backup-result", &format!("backend={} healed={}", r.backend, r.healed));
+                    crate::notifications::notify(
+                        "Integrity check complete",
+                        &format!("backend={} healed={}", r.backend, r.healed),
+                    );
+                }
+                Err(e) => {
+                    set_text("backup-result", &format!("failed: {e}"));
+                    crate::notifications::notify("Integrity check failed", &e);
+                }
             }
         });
     });
