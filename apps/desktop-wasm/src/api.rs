@@ -7,8 +7,9 @@
 //! same `open-runo-router` binary, so this is a same-origin call.
 
 use open_runo_api_types::{
-    DbRecordListResponse, DbRecordResponse, DbUpsertRequest, FederationStatusResponse, RateLimitedResponse,
-    RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
+    DbRecordListResponse, DbRecordResponse, DbUpsertRequest, FederationStatusResponse,
+    FeatureFlagEvaluationResponse, FeatureFlagListResponse, FeatureFlagRequest, FeatureFlagResponse,
+    RateLimitedResponse, RegisterSchemaRequest, SchemaHistoryResponse, SchemaVersion,
 };
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
@@ -269,6 +270,57 @@ pub async fn db_put(table: &str, key: &str, value_json: &str) -> Result<DbRecord
 pub async fn db_delete(table: &str, key: &str) -> Result<(), String> {
     send("DELETE", &format!("/api/db/{table}/{key}"), None).await?;
     Ok(())
+}
+
+pub async fn feature_flag_list() -> Result<FeatureFlagListResponse, String> {
+    get_json("/api/feature-flags").await
+}
+
+pub async fn feature_flag_upsert(
+    name: &str,
+    enabled: bool,
+    rollout_percent: u8,
+    description: &str,
+) -> Result<FeatureFlagResponse, String> {
+    post_json(
+        "/api/feature-flags",
+        &FeatureFlagRequest {
+            name: name.to_string(),
+            enabled,
+            rollout_percent,
+            description: description.to_string(),
+        },
+    )
+    .await
+}
+
+pub async fn feature_flag_evaluate(name: &str, bucket_key: &str) -> Result<FeatureFlagEvaluationResponse, String> {
+    get_json(&format!(
+        "/api/feature-flags/{name}/evaluate?bucket_key={}",
+        urlencoding_encode(bucket_key)
+    ))
+    .await
+}
+
+pub async fn feature_flag_delete(name: &str) -> Result<(), String> {
+    send("DELETE", &format!("/api/feature-flags/{name}"), None).await?;
+    Ok(())
+}
+
+/// Minimal percent-encoding for a query-string value (space/`&`/`=`/`#`/`%`
+/// are the characters that would otherwise corrupt the `?bucket_key=...`
+/// query string); avoids pulling in a dedicated crate for one call site.
+fn urlencoding_encode(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]

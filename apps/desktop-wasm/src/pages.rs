@@ -90,7 +90,7 @@ pub fn mount() {
     };
     let _ = content;
 
-    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim", "persisted-queries", "cache-backup"] {
+    for page in ["dashboard", "schemas", "federation", "ai-routing", "db", "scim", "persisted-queries", "feature-flags", "cache-backup"] {
         let link_id = format!("nav-{page}");
         on_click(&link_id, move || navigate(page));
     }
@@ -122,6 +122,7 @@ fn navigate(page: &str) {
         "db" => render_db(),
         "scim" => render_scim(),
         "persisted-queries" => render_persisted_queries(),
+        "feature-flags" => render_feature_flags(),
         "cache-backup" => render_cache_backup(),
         _ => {}
     }
@@ -523,6 +524,130 @@ fn render_persisted_queries() {
                 ),
                 Err(e) => set_text("pq-fetch-result", &format!("failed: {e}")),
             }
+        });
+    });
+}
+
+fn render_feature_flags() {
+    let Some(content) = content_el() else { return };
+    content.set_inner_html(
+        r#"
+        <h2>Feature Flags</h2>
+        <p>Cosmo Feature Flags parity: canary rollouts with deterministic bucketing (same caller always lands on the same side of a rollout_percent split).</p>
+        <fieldset>
+          <legend>Flags</legend>
+          <button id="ff-refresh-btn">Refresh list</button>
+          <pre id="ff-list">Loading…</pre>
+        </fieldset>
+        <fieldset>
+          <legend>Create / Update flag</legend>
+          <input id="ff-name" placeholder="flag name (e.g. new-checkout)" /><br/>
+          <label><input type="checkbox" id="ff-enabled" checked /> enabled</label><br/>
+          <label>Rollout % <input id="ff-rollout" type="number" min="0" max="100" value="100" /></label><br/>
+          <input id="ff-description" placeholder="description (optional)" /><br/>
+          <button id="ff-upsert-btn">Save</button>
+          <span id="ff-upsert-msg"></span>
+        </fieldset>
+        <fieldset>
+          <legend>Evaluate</legend>
+          <input id="ff-eval-name" placeholder="flag name" />
+          <input id="ff-eval-bucket-key" placeholder="bucket key (e.g. user id)" />
+          <button id="ff-eval-btn">Evaluate</button>
+          <pre id="ff-eval-result"></pre>
+        </fieldset>
+        <fieldset>
+          <legend>Delete flag</legend>
+          <input id="ff-delete-name" placeholder="flag name" />
+          <button id="ff-delete-btn">Delete</button>
+          <span id="ff-delete-msg"></span>
+        </fieldset>
+        "#,
+    );
+
+    fn refresh_list() {
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("ff-list", "loading…");
+            match api::feature_flag_list().await {
+                Ok(list) => {
+                    let lines: Vec<String> = list
+                        .flags
+                        .iter()
+                        .map(|f| {
+                            format!(
+                                "{} enabled={} rollout={}% \"{}\"",
+                                f.name, f.enabled, f.rollout_percent, f.description
+                            )
+                        })
+                        .collect();
+                    set_text(
+                        "ff-list",
+                        if lines.is_empty() { "(no flags yet)".to_string() } else { lines.join("\n") }.as_str(),
+                    );
+                }
+                Err(e) => set_text("ff-list", &format!("failed: {e}")),
+            }
+        });
+    }
+
+    refresh_list();
+    on_click("ff-refresh-btn", refresh_list);
+
+    on_click("ff-upsert-btn", || {
+        set_disabled("ff-upsert-btn", true);
+        wasm_bindgen_futures::spawn_local(async move {
+            let name = input_value("ff-name");
+            let enabled = by_id("ff-enabled")
+                .and_then(|e| e.dyn_into::<web_sys::HtmlInputElement>().ok())
+                .map(|e| e.checked())
+                .unwrap_or(true);
+            let rollout_percent: u8 = input_value("ff-rollout").parse().unwrap_or(100);
+            let description = input_value("ff-description");
+            set_text("ff-upsert-msg", "saving…");
+            match api::feature_flag_upsert(&name, enabled, rollout_percent, &description).await {
+                Ok(f) => {
+                    set_text(
+                        "ff-upsert-msg",
+                        &format!("saved: {} enabled={} rollout={}%", f.name, f.enabled, f.rollout_percent),
+                    );
+                    refresh_list();
+                }
+                Err(e) => set_text("ff-upsert-msg", &format!("failed: {e}")),
+            }
+            set_disabled("ff-upsert-btn", false);
+        });
+    });
+
+    on_click("ff-eval-btn", || {
+        wasm_bindgen_futures::spawn_local(async move {
+            let name = input_value("ff-eval-name");
+            let bucket_key = input_value("ff-eval-bucket-key");
+            set_text("ff-eval-result", "evaluating…");
+            match api::feature_flag_evaluate(&name, &bucket_key).await {
+                Ok(r) => set_text(
+                    "ff-eval-result",
+                    &format!("{} @ bucket \"{}\": enabled={}", r.name, r.bucket_key, r.enabled),
+                ),
+                Err(e) => set_text("ff-eval-result", &format!("failed: {e}")),
+            }
+        });
+    });
+
+    on_click("ff-delete-btn", || {
+        let name = input_value("ff-delete-name");
+        if !confirm(&format!("Delete feature flag \"{name}\"? This cannot be undone.")) {
+            return;
+        }
+        set_disabled("ff-delete-btn", true);
+        wasm_bindgen_futures::spawn_local(async move {
+            set_text("ff-delete-msg", "deleting…");
+            match api::feature_flag_delete(&name).await {
+                Ok(()) => {
+                    set_text("ff-delete-msg", "deleted");
+                    refresh_list();
+                }
+                Err(e) => set_text("ff-delete-msg", &format!("failed: {e}")),
+            }
+            set_disabled("ff-delete-btn", false);
         });
     });
 }
