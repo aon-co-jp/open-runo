@@ -92,6 +92,11 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
             wrap(handlers_hyper::register_schema_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
         .route(
+            Method::POST,
+            "/api/schemas/upload",
+            wrap(handlers_hyper::register_schema_upload_handler(Arc::clone(&state), Arc::clone(&guardian))),
+        )
+        .route(
             Method::GET,
             "/api/schemas/:service",
             wrap(handlers_hyper::get_schema_handler(Arc::clone(&state), Arc::clone(&guardian))),

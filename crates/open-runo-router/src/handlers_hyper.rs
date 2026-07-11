@@ -5,7 +5,9 @@
 //! matching the JSON shape/status codes of its poem counterpart exactly.
 
 use crate::auth_hyper::check_api_key;
-use crate::hyper_compat::{empty_status, json_response, query_params, read_json_body, sse_response, Handler, SseEvent};
+use crate::hyper_compat::{
+    empty_status, json_response, query_params, read_json_body, sse_response, Handler, Response, SseEvent,
+};
 use crate::keyring::KeyGuardian;
 use crate::state::AppState;
 use crate::validation::{DB_UPSERT_REQUEST, FEATURE_FLAG_REQUEST, REGISTER_SCHEMA_REQUEST};
@@ -496,6 +498,53 @@ pub fn get_schema_history_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
     })
 }
 
+/// Shared registration logic for both the JSON (`register_schema_handler`)
+/// and multipart-file-upload (`register_schema_upload_handler`) entry
+/// points, so the two transports can never drift on what "register a
+/// schema" actually does.
+async fn register_schema_and_respond(
+    state: &Arc<AppState>,
+    actor: &str,
+    body: RegisterSchemaRequest,
+) -> Response {
+    let stage = parse_stage(&body.stage);
+    let namespace = body
+        .namespace
+        .clone()
+        .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
+    let version = state
+        .schema_registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .register_in(&namespace, &body.service_name, &body.sdl, stage);
+
+    crate::audit::record(
+        state,
+        actor,
+        "schema.register",
+        format!("{}@{}", body.service_name, body.stage),
+    )
+    .await;
+
+    let _ = state.events.send(crate::state::SchemaEvent {
+        service_name: body.service_name.clone(),
+        stage: body.stage.clone(),
+        at: chrono::Utc::now().to_rfc3339(),
+    });
+
+    json_response(
+        StatusCode::OK,
+        &SchemaVersion {
+            id: version.id.to_string(),
+            namespace: version.namespace.clone(),
+            service_name: version.service_name.clone(),
+            sdl: version.sdl.clone(),
+            stage: stage_name(version.stage).to_string(),
+            created_at: version.created_at.to_rfc3339(),
+        },
+    )
+}
+
 /// POST /api/schemas — poem-free port of `handlers::schemas::register_schema`.
 pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
     Arc::new(move |req, _params| {
@@ -535,42 +584,71 @@ pub fn register_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
                 }
             };
 
-            let stage = parse_stage(&body.stage);
-            let namespace = body
-                .namespace
-                .clone()
-                .unwrap_or_else(|| DEFAULT_NAMESPACE.to_string());
-            let version = state
-                .schema_registry
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .register_in(&namespace, &body.service_name, &body.sdl, stage);
+            register_schema_and_respond(&state, &actor, body).await
+        })
+    })
+}
 
-            crate::audit::record(
-                &state,
-                &actor,
-                "schema.register",
-                format!("{}@{}", body.service_name, body.stage),
-            )
-            .await;
+/// POST /api/schemas/upload — `multipart/form-data` equivalent of
+/// `register_schema_handler`, for uploading an SDL file directly (e.g. from
+/// an `<input type="file">` in the WASM admin UI) instead of inlining the
+/// SDL text into a JSON body. Poem-free hand-rolled multipart parsing, see
+/// `hyper_compat::read_multipart_body` (the Poem-parity gap this closes).
+///
+/// Expected fields: `service_name` (text), `stage` (text, optional,
+/// defaults like the JSON path), `namespace` (text, optional), `sdl_file`
+/// (file — its raw bytes become the SDL text).
+pub fn register_schema_upload_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
+        let guardian = Arc::clone(&guardian);
+        Box::pin(async move {
+            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+                return empty_status(status);
+            }
+            let actor = actor_from_headers(req.headers());
 
-            let _ = state.events.send(crate::state::SchemaEvent {
-                service_name: body.service_name.clone(),
-                stage: body.stage.clone(),
-                at: chrono::Utc::now().to_rfc3339(),
-            });
+            let fields = match crate::hyper_compat::read_multipart_body(req).await {
+                Ok(f) => f,
+                Err(resp) => return resp,
+            };
 
-            json_response(
-                StatusCode::OK,
-                &SchemaVersion {
-                    id: version.id.to_string(),
-                    namespace: version.namespace.clone(),
-                    service_name: version.service_name.clone(),
-                    sdl: version.sdl.clone(),
-                    stage: stage_name(version.stage).to_string(),
-                    created_at: version.created_at.to_rfc3339(),
-                },
-            )
+            let mut service_name: Option<String> = None;
+            let mut stage: Option<String> = None;
+            let mut namespace: Option<String> = None;
+            let mut sdl: Option<String> = None;
+
+            for field in fields {
+                match field.name.as_str() {
+                    "service_name" => service_name = Some(String::from_utf8_lossy(&field.data).into_owned()),
+                    "stage" => stage = Some(String::from_utf8_lossy(&field.data).into_owned()),
+                    "namespace" => namespace = Some(String::from_utf8_lossy(&field.data).into_owned()),
+                    "sdl_file" => sdl = Some(String::from_utf8_lossy(&field.data).into_owned()),
+                    _ => {}
+                }
+            }
+
+            let Some(service_name) = service_name else {
+                return json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({ "error": "missing required field: service_name" }),
+                );
+            };
+            let Some(sdl) = sdl else {
+                return json_response(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    &serde_json::json!({ "error": "missing required file field: sdl_file" }),
+                );
+            };
+
+            let body = RegisterSchemaRequest {
+                service_name,
+                sdl,
+                stage: stage.unwrap_or_else(|| "local".to_string()),
+                namespace,
+            };
+
+            register_schema_and_respond(&state, &actor, body).await
         })
     })
 }
@@ -2189,6 +2267,115 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    }
+
+    /// Same registration flow as `register_and_fetch_schema_roundtrip`, but
+    /// via the `multipart/form-data` upload endpoint (SDL as a file field)
+    /// instead of an inline JSON body -- proves the two transports actually
+    /// converge on the same registered schema state.
+    #[tokio::test]
+    async fn register_schema_upload_and_fetch_roundtrip() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new()
+            .route(
+                Method::POST,
+                "/api/schemas/upload",
+                register_schema_upload_handler(Arc::clone(&state), Arc::clone(&guardian)),
+            )
+            .route(
+                Method::GET,
+                "/api/schemas/:service",
+                get_schema_handler(Arc::clone(&state), guardian),
+            );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let form = reqwest::multipart::Form::new()
+            .text("service_name", "orders")
+            .text("stage", "local")
+            .part(
+                "sdl_file",
+                reqwest::multipart::Part::bytes(b"type Order { id: ID! total: Float }".to_vec())
+                    .file_name("orders.graphql")
+                    .mime_str("text/plain")
+                    .unwrap(),
+            );
+
+        let resp = client
+            .post(format!("http://{addr}/api/schemas/upload"))
+            .header("x-api-key", "test-key")
+            .multipart(form)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["service_name"], "orders");
+        assert_eq!(body["sdl"], "type Order { id: ID! total: Float }");
+
+        let resp = client
+            .get(format!("http://{addr}/api/schemas/orders"))
+            .header("x-api-key", "test-key")
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        assert_eq!(body["sdl"], "type Order { id: ID! total: Float }");
+    }
+
+    #[tokio::test]
+    async fn register_schema_upload_requires_api_key() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/schemas/upload",
+            register_schema_upload_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let form = reqwest::multipart::Form::new()
+            .text("service_name", "orders")
+            .part("sdl_file", reqwest::multipart::Part::bytes(b"type Order { id: ID! }".to_vec()));
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/schemas/upload"))
+            .multipart(form)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn register_schema_upload_rejects_missing_sdl_file() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let router = Router::new().route(
+            Method::POST,
+            "/api/schemas/upload",
+            register_schema_upload_handler(Arc::clone(&state), guardian),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let form = reqwest::multipart::Form::new().text("service_name", "orders");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/api/schemas/upload"))
+            .header("x-api-key", "test-key")
+            .multipart(form)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::UNPROCESSABLE_ENTITY);
     }
 
     #[tokio::test]

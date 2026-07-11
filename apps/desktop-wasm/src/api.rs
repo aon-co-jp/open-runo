@@ -230,6 +230,68 @@ pub async fn register_schema(service_name: &str, sdl: &str, stage: &str) -> Resu
     .await
 }
 
+/// Send `form` as the request body (browser sets the `multipart/form-data;
+/// boundary=...` content-type itself — never set it manually, or the
+/// boundary the browser actually wrote the body with won't match). Poem-free
+/// equivalent of Poem's `Multipart` extractor on the client side; the
+/// server-side counterpart is `hyper_compat::read_multipart_body`.
+async fn do_fetch_form(path: &str, form: &web_sys::FormData, api_key: &str) -> Result<Response, String> {
+    let opts = RequestInit::new();
+    opts.set_method("POST");
+    opts.set_mode(RequestMode::SameOrigin);
+    opts.set_body(form.as_ref());
+
+    let url = format!("{}{path}", base_url());
+    let request = Request::new_with_str_and_init(&url, &opts).map_err(|e| format!("{e:?}"))?;
+    request
+        .headers()
+        .set("x-api-key", api_key)
+        .map_err(|e| format!("{e:?}"))?;
+
+    let window = web_sys::window().ok_or("no window")?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .map_err(|e| format!("fetch error: {e:?}"))?;
+    resp_value.dyn_into().map_err(|e| format!("{e:?}"))
+}
+
+/// `POST /api/schemas/upload` — register a schema from an uploaded file
+/// (e.g. an `<input type="file">` selection) instead of inlining the SDL
+/// text into a JSON body. Same transparent-API-key + 401-retry handling as
+/// `send()`, duplicated here because `FormData` bodies can't share
+/// `do_fetch`'s `Option<&str>` body parameter.
+pub async fn register_schema_upload(
+    service_name: &str,
+    stage: &str,
+    file: &web_sys::File,
+) -> Result<SchemaVersion, String> {
+    let form = web_sys::FormData::new().map_err(|e| format!("{e:?}"))?;
+    form.append_with_str("service_name", service_name)
+        .map_err(|e| format!("{e:?}"))?;
+    form.append_with_str("stage", stage).map_err(|e| format!("{e:?}"))?;
+    form.append_with_blob("sdl_file", file).map_err(|e| format!("{e:?}"))?;
+
+    let api_key = get_or_issue_api_key().await?;
+    let mut resp = do_fetch_form("/api/schemas/upload", &form, &api_key).await?;
+
+    if resp.status() == 401 {
+        clear_cached_api_key();
+        let fresh_key = get_or_issue_api_key().await?;
+        resp = do_fetch_form("/api/schemas/upload", &form, &fresh_key).await?;
+    }
+
+    if !resp.ok() {
+        let request_id = resp.headers().get("x-request-id").ok().flatten();
+        let suffix = request_id.map(|id| format!(" (request-id: {id})")).unwrap_or_default();
+        return Err(format!("HTTP {}{suffix}", resp.status()));
+    }
+
+    let json = JsFuture::from(resp.json().map_err(|e| format!("{e:?}"))?)
+        .await
+        .map_err(|e| format!("body read error: {e:?}"))?;
+    serde_wasm_bindgen::from_value(json).map_err(|e| format!("decode error: {e}"))
+}
+
 pub async fn get_schema_history(service: &str) -> Result<SchemaHistoryResponse, String> {
     get_json(&format!("/api/schemas/{service}/history")).await
 }

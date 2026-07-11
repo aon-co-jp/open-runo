@@ -38,7 +38,7 @@
 | OpenAPI 3.0仕様生成 | `crates/open-runo-router/src/openapi.rs`(手書き静的JSON、`GET /api/openapi.json`) | ✅ 実装済み(2026-07-11追加。macro自動生成ではなく手書き) |
 | ~~WebSocket(汎用)~~ | `hyper_compat::websocket_handler`(RFC 6455手書き実装) | ✅ 完了(2026-07-11)。`GET /api/ws-echo`(エコー)・`GET /api/ws-events`(state.eventsのWS版、認証必須)の2ルートで実証。GraphQL Subscriptions(poem版`graphql_route`)は引き続き別経路 |
 | ~~gzip/br圧縮~~ | `middleware_hyper::with_compression`(gzip、`flate2`使用) | ✅ 完了(2026-07-11、gzipのみ・brは見送り。理由は3節参照) |
-| Multipart(ファイルアップロード) | ― | ❌ 未実装(現状ファイルアップロードを要する機能なし) |
+| ~~Multipart(ファイルアップロード)~~ | `hyper_compat::read_multipart_body` + `POST /api/schemas/upload` | ✅ 完了(2026-07-11)。RFC 7578手書きパーサー(`multer`等の外部crate不使用)。WASM管理UIに`<input type="file">`のアップロードUIを追加、実バイナリ+実ブラウザでファイル選択→アップロード→Schema Historyへの反映まで確認済み |
 | Cookie/セッション管理 | ― | ❌ 未実装(X-Api-Keyヘッダのみ、Cookie不使用の設計方針) |
 | CSRF保護 | ― | N/A(ブラウザセッションCookieを使わないAPI設計のため該当なし) |
 | TLS/ACME | ― | N/A(リバースプロキシでのTLS終端を前提、アプリ側では未実装) |
@@ -51,7 +51,7 @@
 |------|--------|------|
 | ~~gzip/br圧縮ミドルウェア~~ | ★★☆ | ✅ 完了(2026-07-11)。本番運用のパフォーマンス向上に直結。`GET /api/openapi.json`で実測10265→2115バイト(約79%削減)を確認 |
 | ~~汎用WebSocket対応~~ | ★★☆ | ✅ 完了(2026-07-11)。RFC 6455ハンドシェイク・フレーミングを`sha1`のみでhyper_compatに手書き実装、実バイナリ+実WSクライアント(Node.js `WebSocket`)でエコーの往復を確認 |
-| Multipart/ファイルアップロード | ★☆☆ | 現状のAPI設計では不要(スキーマはSDL文字列、バックアップはJSON)。将来ファイル添付機能が必要になれば実装 |
+| ~~Multipart/ファイルアップロード~~ | ★☆☆ | ✅ 完了(2026-07-11)。`POST /api/schemas/upload`でSDLファイルの直接アップロードに対応 |
 | Cookie/セッション | ★☆☆ | API-Key/JWT/OIDCベースの認証方針と方向性が異なるため、意図的に見送り |
 | gRPC / MCP Server対応 | ★☆☆ | `docs/cosmo-parity.md`のCosmo側ギャップ(gRPC/MCP)と重複。将来必要になれば両方をまとめて検討 |
 
@@ -59,8 +59,9 @@
 
 hyper_compatはPoemの**コア機能(ルーティング・エクストラクタ・レスポンス・
 ミドルウェア・SSE・静的配信・テスト)を実用上必要十分にカバー**している。
-未実装は主に「Poemのfeature flagでオプトインする周辺機能」であり、現状の
-REST/GraphQL API提供という用途では致命的な欠落はない。gzip圧縮・汎用
-WebSocket対応はいずれも2026-07-11に実装完了。残るギャップ
-(Multipart/Cookie・セッション/gRPC・MCP Server)はいずれも★☆☆で、
-現状のAPI設計・認証方針とは意図的に方向性が異なるため見送り。
+gzip圧縮・汎用WebSocket・Multipartファイルアップロードはいずれも
+2026-07-11に実装完了。残るギャップ(Cookie/セッション・CSRF・TLS/ACME・
+gRPC・MCP Server)は着手中(2026-07-11時点でCLAUDE.mdのタスク一覧#15〜#19
+として追跡)。「意図的に見送り」としていたCookie/セッション・CSRFも、
+ユーザー指示により実装対象へ変更(2026-07-12)——API-Keyベース認証を置き
+換えるのではなく、追加の認証経路として実装する方針。

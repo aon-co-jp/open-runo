@@ -475,6 +475,158 @@ pub async fn read_json_body<T: serde::de::DeserializeOwned>(
     })
 }
 
+// ── Multipart/form-data support (RFC 7578) ───────────────────────────────
+//
+// Poem-free equivalent of Poem's `Multipart` extractor. Hand-rolled byte
+// scanning over the collected request body -- no `multer`/`multipart`
+// crate dependency, matching this module's existing pattern for
+// self-contained protocol parsing (see the WebSocket section above).
+
+/// One decoded part of a `multipart/form-data` request: the form field
+/// `name` from its `Content-Disposition` header, an optional `filename`
+/// (present for file inputs), an optional part-level `Content-Type`, and
+/// the raw bytes of the part body.
+#[derive(Debug, Clone)]
+pub struct MultipartField {
+    pub name: String,
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub data: Vec<u8>,
+}
+
+/// Extract the `boundary=...` parameter from a `Content-Type:
+/// multipart/form-data; boundary=...` header value.
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    content_type.split(';').find_map(|part| {
+        let part = part.trim();
+        part.strip_prefix("boundary=")
+            .map(|b| b.trim_matches('"').to_string())
+    })
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || from > haystack.len() {
+        return None;
+    }
+    haystack[from..]
+        .windows(needle.len())
+        .position(|w| w == needle)
+        .map(|p| p + from)
+}
+
+/// Parse a `Content-Disposition: form-data; name="..."; filename="..."`
+/// header line into `(name, filename)`.
+fn parse_content_disposition(line: &str) -> (Option<String>, Option<String>) {
+    let mut name = None;
+    let mut filename = None;
+    for piece in line.split(';').skip(1) {
+        let piece = piece.trim();
+        if let Some(v) = piece.strip_prefix("name=") {
+            name = Some(v.trim_matches('"').to_string());
+        } else if let Some(v) = piece.strip_prefix("filename=") {
+            filename = Some(v.trim_matches('"').to_string());
+        }
+    }
+    (name, filename)
+}
+
+/// Read and parse a `multipart/form-data` request body into its constituent
+/// fields. Returns a `400`-shaped `Err(Response)` if the `Content-Type`
+/// isn't `multipart/form-data`, the boundary is missing, or the body is
+/// malformed. Parts without a `name=` in their `Content-Disposition` are
+/// silently skipped (matches typical multipart-library leniency — a
+/// malformed individual part shouldn't fail the whole upload).
+pub async fn read_multipart_body(req: Request) -> Result<Vec<MultipartField>, Response> {
+    let content_type = req
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if !content_type.starts_with("multipart/form-data") {
+        return Err(json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "expected multipart/form-data request body" }),
+        ));
+    }
+    let Some(boundary) = multipart_boundary(&content_type) else {
+        return Err(json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "multipart/form-data content-type missing boundary" }),
+        ));
+    };
+
+    let bytes = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => {
+            return Err(json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({ "error": "failed to read request body" }),
+            ))
+        }
+    };
+
+    let delimiter = format!("--{boundary}").into_bytes();
+    let mut fields = Vec::new();
+
+    let Some(first_boundary) = find_subslice(&bytes, &delimiter, 0) else {
+        return Err(json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({ "error": "malformed multipart body: boundary not found" }),
+        ));
+    };
+    let mut pos = first_boundary + delimiter.len();
+
+    loop {
+        // A boundary immediately followed by "--" marks the terminal
+        // boundary (RFC 7578 §4.1) -- stop parsing.
+        if bytes[pos..].starts_with(b"--") {
+            break;
+        }
+        if bytes[pos..].starts_with(b"\r\n") {
+            pos += 2;
+        }
+        let Some(header_end) = find_subslice(&bytes, b"\r\n\r\n", pos) else {
+            break;
+        };
+        let header_bytes = &bytes[pos..header_end];
+        let headers_str = String::from_utf8_lossy(header_bytes);
+
+        let mut name = None;
+        let mut filename = None;
+        let mut part_content_type = None;
+        for line in headers_str.split("\r\n") {
+            let lower = line.to_ascii_lowercase();
+            if lower.starts_with("content-disposition:") {
+                let (n, f) = parse_content_disposition(&line[line.find(':').map(|i| i + 1).unwrap_or(0)..]);
+                name = n;
+                filename = f;
+            } else if lower.starts_with("content-type:") {
+                part_content_type = line.split_once(':').map(|(_, v)| v.trim().to_string());
+            }
+        }
+
+        let body_start = header_end + 4;
+        let Some(next_boundary) = find_subslice(&bytes, &delimiter, body_start) else {
+            break;
+        };
+        let mut body_end = next_boundary;
+        if body_end >= body_start + 2 && &bytes[body_end - 2..body_end] == b"\r\n" {
+            body_end -= 2;
+        }
+        let data = bytes[body_start..body_end].to_vec();
+
+        if let Some(name) = name {
+            fields.push(MultipartField { name, filename, content_type: part_content_type, data });
+        }
+
+        pos = next_boundary + delimiter.len();
+    }
+
+    Ok(fields)
+}
+
 /// `GET /health` and `GET /healthz` — poem-free equivalent of the handler
 /// in `lib.rs`. Kept in lockstep with that JSON shape until the poem
 /// version is retired.
@@ -860,6 +1012,111 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    /// End-to-end: a real multipart/form-data body (constructed by hand,
+    /// with the exact boundary framing browsers send), routed through a
+    /// handler that calls `read_multipart_body` over real HTTP.
+    #[tokio::test]
+    async fn multipart_body_parses_text_and_file_fields_over_real_http() {
+        let router = Router::new().route(
+            Method::POST,
+            "/upload",
+            Arc::new(|req, _params| {
+                Box::pin(async move {
+                    match read_multipart_body(req).await {
+                        Ok(fields) => {
+                            let summary: Vec<_> = fields
+                                .iter()
+                                .map(|f| {
+                                    serde_json::json!({
+                                        "name": f.name,
+                                        "filename": f.filename,
+                                        "content_type": f.content_type,
+                                        "data": String::from_utf8_lossy(&f.data),
+                                    })
+                                })
+                                .collect();
+                            json_response(StatusCode::OK, &summary)
+                        }
+                        Err(resp) => resp,
+                    }
+                })
+            }),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let form = reqwest::multipart::Form::new()
+            .text("service_name", "users")
+            .text("stage", "local")
+            .part(
+                "sdl_file",
+                reqwest::multipart::Part::bytes(b"type User { id: ID! }".to_vec())
+                    .file_name("users.graphql")
+                    .mime_str("text/plain")
+                    .unwrap(),
+            );
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/upload"))
+            .multipart(form)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let body: serde_json::Value = resp.json().await.expect("valid json body");
+        let fields = body.as_array().expect("array of fields");
+        assert_eq!(fields.len(), 3);
+
+        let by_name = |name: &str| fields.iter().find(|f| f["name"] == name).expect("field present");
+        assert_eq!(by_name("service_name")["data"], "users");
+        assert_eq!(by_name("stage")["data"], "local");
+        let file_field = by_name("sdl_file");
+        assert_eq!(file_field["filename"], "users.graphql");
+        assert_eq!(file_field["data"], "type User { id: ID! }");
+    }
+
+    #[test]
+    fn multipart_boundary_extracts_from_content_type() {
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=abc123"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            multipart_boundary("multipart/form-data; boundary=\"quoted-boundary\""),
+            Some("quoted-boundary".to_string())
+        );
+        assert_eq!(multipart_boundary("application/json"), None);
+    }
+
+    #[tokio::test]
+    async fn read_multipart_body_rejects_non_multipart_content_type() {
+        let router = Router::new().route(
+            Method::POST,
+            "/upload",
+            Arc::new(|req, _params| {
+                Box::pin(async move {
+                    match read_multipart_body(req).await {
+                        Ok(_) => empty_status(StatusCode::OK),
+                        Err(resp) => resp,
+                    }
+                })
+            }),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/upload"))
+            .json(&serde_json::json!({ "not": "multipart" }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

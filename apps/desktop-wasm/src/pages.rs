@@ -41,6 +41,15 @@ fn select_value(id: &str) -> String {
         .unwrap_or_default()
 }
 
+/// The first selected `File` from an `<input type="file">`, or `None` if
+/// the element is missing or no file has been chosen.
+fn file_input_first_file(id: &str) -> Option<web_sys::File> {
+    by_id(id)
+        .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+        .and_then(|e| e.files())
+        .and_then(|files| files.get(0))
+}
+
 fn set_text(id: &str, text: &str) {
     if let Some(el) = by_id(id) {
         el.set_text_content(Some(text));
@@ -165,6 +174,21 @@ fn render_schemas() {
           <span id="register-msg"></span>
         </fieldset>
         <fieldset>
+          <legend>Register Schema from File (multipart upload)</legend>
+          <label>Service name <input id="svc-upload-name" placeholder="users-service" /></label><br/>
+          <label>Stage
+            <select id="svc-upload-stage">
+              <option value="local">local</option>
+              <option value="development">development</option>
+              <option value="staging">staging</option>
+              <option value="production">production</option>
+            </select>
+          </label><br/>
+          <label>SDL file <input id="svc-sdl-file" type="file" accept=".graphql,.gql,.txt,text/plain" /></label><br/>
+          <button id="upload-btn">Upload</button>
+          <span id="upload-msg"></span>
+        </fieldset>
+        <fieldset>
           <legend>Schema History</legend>
           <input id="hist-svc" placeholder="service name" />
           <button id="hist-btn">Fetch</button>
@@ -191,6 +215,31 @@ fn render_schemas() {
                 Err(e) => set_text("register-msg", &format!("failed: {e}")),
             }
             set_disabled("register-btn", false);
+        });
+    });
+
+    on_click("upload-btn", || {
+        set_disabled("upload-btn", true);
+        wasm_bindgen_futures::spawn_local(async move {
+            let name = input_value("svc-upload-name");
+            let stage = select_value("svc-upload-stage");
+            let Some(file) = file_input_first_file("svc-sdl-file") else {
+                set_text("upload-msg", "choose a file first");
+                set_disabled("upload-btn", false);
+                return;
+            };
+            set_text("upload-msg", "uploading…");
+            match api::register_schema_upload(&name, &stage, &file).await {
+                Ok(r) => set_text(
+                    "upload-msg",
+                    &format!(
+                        "registered {} @{} in \"{}\" ({}) at {}",
+                        r.service_name, r.stage, r.namespace, r.id, r.created_at
+                    ),
+                ),
+                Err(e) => set_text("upload-msg", &format!("failed: {e}")),
+            }
+            set_disabled("upload-btn", false);
         });
     });
 
