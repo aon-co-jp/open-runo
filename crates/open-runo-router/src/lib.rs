@@ -153,7 +153,7 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
         .route(
             Method::GET,
             "/api/db/routing",
-            wrap(handlers_hyper::db_routing_handler(Arc::clone(&guardian))),
+            wrap(handlers_hyper::db_routing_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
         .route(
             Method::GET,

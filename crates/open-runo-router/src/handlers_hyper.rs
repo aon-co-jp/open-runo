@@ -205,7 +205,8 @@ pub fn db_status_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Ha
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             json_response(
@@ -221,12 +222,15 @@ pub fn db_status_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Ha
 
 /// GET /api/db/routing — poem-free port of `handlers::db::db_routing`.
 /// The routing table is a static description (see the poem handler's
-/// doc comment), so this has no dependency on `state` beyond auth.
-pub fn db_routing_handler(guardian: Arc<KeyGuardian>) -> Handler {
+/// doc comment), so `state` is only needed for session-cookie auth
+/// (`state.sessions`), not for the response body itself.
+pub fn db_routing_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
     Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let entries = vec![
@@ -261,7 +265,8 @@ pub fn db_list_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Hand
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let table = params.get("table").unwrap_or("").to_string();
@@ -292,7 +297,8 @@ pub fn db_get_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handl
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let table = params.get("table").unwrap_or("").to_string();
@@ -321,10 +327,11 @@ pub fn db_put_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handl
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let table = params.get("table").unwrap_or("").to_string();
             let key = params.get("key").unwrap_or("").to_string();
 
@@ -389,10 +396,11 @@ pub fn db_delete_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Ha
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let table = params.get("table").unwrap_or("").to_string();
             let key = params.get("key").unwrap_or("").to_string();
 
@@ -1883,10 +1891,11 @@ pub fn feature_flag_upsert_handler(state: Arc<AppState>, guardian: Arc<KeyGuardi
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
 
             let raw: serde_json::Value = match read_json_body(req).await {
                 Ok(v) => v,
@@ -1951,7 +1960,8 @@ pub fn feature_flag_list_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let registry = state
@@ -1970,7 +1980,8 @@ pub fn feature_flag_get_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let name = params.get("name").unwrap_or("").to_string();
@@ -1995,10 +2006,11 @@ pub fn feature_flag_delete_handler(state: Arc<AppState>, guardian: Arc<KeyGuardi
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let name = params.get("name").unwrap_or("").to_string();
 
             let existed = {
@@ -2030,7 +2042,8 @@ pub fn feature_flag_evaluate_handler(state: Arc<AppState>, guardian: Arc<KeyGuar
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let name = params.get("name").unwrap_or("").to_string();
@@ -2163,7 +2176,7 @@ mod tests {
     async fn db_routing_has_expected_tables() {
         let state = Arc::new(AppState::new());
         let guardian = guardian(&state);
-        let router = Router::new().route(Method::GET, "/api/db/routing", db_routing_handler(guardian));
+        let router = Router::new().route(Method::GET, "/api/db/routing", db_routing_handler(Arc::clone(&state), guardian));
         let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
             .await
             .expect("bind ephemeral port");
@@ -2183,7 +2196,7 @@ mod tests {
     async fn db_routing_requires_api_key() {
         let state = Arc::new(AppState::new());
         let guardian = guardian(&state);
-        let router = Router::new().route(Method::GET, "/api/db/routing", db_routing_handler(guardian));
+        let router = Router::new().route(Method::GET, "/api/db/routing", db_routing_handler(Arc::clone(&state), guardian));
         let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
             .await
             .expect("bind ephemeral port");
@@ -2879,6 +2892,87 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    /// Proves the DB CRUD handlers actually accept session-cookie auth now
+    /// (not just X-Api-Key) -- the broader rollout of
+    /// `authenticate_with_session` past `register_schema_handler`
+    /// mentioned as a follow-up in docs/poem-parity.md. A real login (real
+    /// issued key, not the RegistryEmpty dev fast-path) followed by a real
+    /// PUT/GET/DELETE using only the cookie + CSRF token, no X-Api-Key
+    /// header at all.
+    #[tokio::test]
+    async fn db_crud_accepts_session_cookie_with_csrf_token() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let real_key = guardian
+            .issue("dana", vec!["developer".to_string()], None)
+            .await
+            .expect("issuing a real key should succeed");
+
+        let router = db_router(&state, Arc::clone(&guardian)).route(
+            Method::POST,
+            "/api/session/login",
+            session_login_handler(Arc::clone(&guardian), Arc::clone(&state.sessions)),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let login_resp = client
+            .post(format!("http://{addr}/api/session/login"))
+            .header("x-api-key", &real_key)
+            .send()
+            .await
+            .expect("login should succeed");
+        let cookie_pair = login_resp
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let csrf_token = login_resp.json::<serde_json::Value>().await.unwrap()["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // PUT via cookie + CSRF, no X-Api-Key at all.
+        let resp = client
+            .put(format!("http://{addr}/api/db/test_table/session_rec"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header("x-csrf-token", &csrf_token)
+            .json(&serde_json::json!({ "value": { "via": "session" } }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        // GET is not state-changing -- the cookie alone (no CSRF token) is
+        // enough, matching authenticate_with_session's method-based rule.
+        let resp = client
+            .get(format!("http://{addr}/api/db/test_table/session_rec"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["value"]["via"], "session");
+
+        // DELETE is state-changing again -- needs the CSRF token.
+        let resp = client
+            .delete(format!("http://{addr}/api/db/test_table/session_rec"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header("x-csrf-token", &csrf_token)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3602,6 +3696,72 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    }
+
+    /// Feature flags are the second real (non-toy) route group -- after
+    /// the DB CRUD group -- rolled onto `authenticate_with_session`, past
+    /// the original `register_schema_handler`-only example. Upsert
+    /// (state-changing, needs CSRF) then evaluate (read-only, cookie
+    /// alone suffices), no X-Api-Key at all.
+    #[tokio::test]
+    async fn feature_flag_upsert_and_evaluate_accept_session_cookie_with_csrf_token() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let real_key = guardian
+            .issue("erin", vec!["developer".to_string()], None)
+            .await
+            .expect("issuing a real key should succeed");
+
+        let router = feature_flags_router(&state, Arc::clone(&guardian)).route(
+            Method::POST,
+            "/api/session/login",
+            session_login_handler(Arc::clone(&guardian), Arc::clone(&state.sessions)),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let login_resp = client
+            .post(format!("http://{addr}/api/session/login"))
+            .header("x-api-key", &real_key)
+            .send()
+            .await
+            .expect("login should succeed");
+        let cookie_pair = login_resp
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let csrf_token = login_resp.json::<serde_json::Value>().await.unwrap()["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = client
+            .post(format!("http://{addr}/api/feature-flags"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header("x-csrf-token", &csrf_token)
+            .json(&serde_json::json!({ "name": "session-flag", "rollout_percent": 100 }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+        let resp = client
+            .get(format!("http://{addr}/api/feature-flags/session-flag/evaluate?bucket_key=anyone"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["enabled"], true);
     }
 
     /// Real end-to-end WebSocket round trip: a real TCP listener + real
