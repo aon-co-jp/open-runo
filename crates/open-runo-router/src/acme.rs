@@ -522,6 +522,380 @@ mod client {
         Ok((cert_pem, key_pem))
     }
 
+    // ── TLS-ALPN-01 (RFC 8737) ──────────────────────────────────────────
+    //
+    // Unlike HTTP-01, TLS-ALPN-01 doesn't need a separately reachable
+    // port 80 or an HTTP challenge responder -- the ACME CA connects
+    // straight to this server's normal TLS port and negotiates the
+    // `acme-tls/1` ALPN protocol. Instead of serving real application
+    // data over that connection, the server presents a throwaway
+    // self-signed certificate whose only job is carrying a critical
+    // extension (id-pe-acmeIdentifier, RFC 8737 §3) containing
+    // SHA-256(key-authorization); the CA checks that extension and never
+    // sends/receives HTTP at all. This reuses the same rustls TLS stack
+    // already in this crate (`tls` feature, implied by `acme`) via a
+    // `ResolvesServerCert` that inspects the ClientHello's requested ALPN
+    // protocols and only swaps in the validation cert when `acme-tls/1`
+    // was requested -- every other connection on the same port (ordinary
+    // HTTPS traffic included) is completely unaffected by an in-progress
+    // validation.
+    pub mod tls_alpn01 {
+        use super::{http01_key_authorization, AcmeAccountKey, AcmeClient};
+        use open_runo_core::{AppError, Result};
+        use rustls::server::{ClientHello, ResolvesServerCert};
+        use rustls::sign::CertifiedKey;
+        use rustls::ServerConfig;
+        use std::collections::HashMap;
+        use std::sync::{Arc, RwLock};
+
+        /// id-pe-acmeIdentifier (RFC 8737 §3).
+        const ACME_IDENTIFIER_OID: &[u64] = &[1, 3, 6, 1, 5, 5, 7, 1, 31];
+        /// The ALPN protocol name the CA's TLS-ALPN-01 validator negotiates.
+        pub const ACME_TLS_ALPN_1: &str = "acme-tls/1";
+
+        /// SHA-256 digest of the key authorization (RFC 8737 §3) -- what
+        /// actually goes inside the validation cert's extension, unlike
+        /// HTTP-01 which publishes the key-authorization string itself.
+        pub fn key_authorization_digest(token: &str, account_key: &AcmeAccountKey) -> [u8; 32] {
+            let key_auth = http01_key_authorization(token, account_key);
+            let digest = ring::digest::digest(&ring::digest::SHA256, key_auth.as_bytes());
+            let mut out = [0u8; 32];
+            out.copy_from_slice(digest.as_ref());
+            out
+        }
+
+        /// Build the throwaway validation certificate for `domain` carrying
+        /// `digest` in the critical acmeIdentifier extension, DER-encoded
+        /// as an OCTET STRING (tag `0x04`, then the length byte, then the
+        /// 32 digest bytes -- SHA-256 digests never need long-form length
+        /// encoding since 32 < 128).
+        pub fn generate_validation_cert(domain: &str, digest: [u8; 32]) -> Result<CertifiedKey> {
+            let key_pair = rcgen::KeyPair::generate()
+                .map_err(|e| AppError::Internal(format!("TLS-ALPN-01 cert key generation failed: {e}")))?;
+            let mut params = rcgen::CertificateParams::new(vec![domain.to_string()])
+                .map_err(|e| AppError::Internal(format!("TLS-ALPN-01 cert params failed: {e}")))?;
+
+            let mut octet_string = vec![0x04, digest.len() as u8];
+            octet_string.extend_from_slice(&digest);
+            let mut ext = rcgen::CustomExtension::from_oid_content(ACME_IDENTIFIER_OID, octet_string);
+            ext.set_criticality(true);
+            params.custom_extensions.push(ext);
+
+            let cert = params
+                .self_signed(&key_pair)
+                .map_err(|e| AppError::Internal(format!("TLS-ALPN-01 cert self-sign failed: {e}")))?;
+
+            let key_der = rustls::pki_types::PrivateKeyDer::try_from(key_pair.serialize_der())
+                .map_err(|e| AppError::Internal(format!("TLS-ALPN-01 key DER conversion failed: {e}")))?;
+            let signing_key = rustls::crypto::ring::sign::any_supported_type(&key_der)
+                .map_err(|e| AppError::Internal(format!("TLS-ALPN-01 signing key build failed: {e}")))?;
+
+            Ok(CertifiedKey {
+                cert: vec![cert.der().clone()],
+                key: signing_key,
+                ocsp: None,
+            })
+        }
+
+        /// Serves the validation cert for `acme-tls/1` connections whose
+        /// SNI matches a domain with a challenge currently published;
+        /// every other connection (any other ALPN request, or none at
+        /// all) gets `fallback` -- ordinary HTTPS traffic on the same
+        /// port keeps working unmodified during a validation.
+        pub struct TlsAlpnResolver {
+            challenges: RwLock<HashMap<String, Arc<CertifiedKey>>>,
+            fallback: Arc<CertifiedKey>,
+        }
+
+        impl TlsAlpnResolver {
+            pub fn new(fallback: Arc<CertifiedKey>) -> Arc<Self> {
+                Arc::new(Self {
+                    challenges: RwLock::new(HashMap::new()),
+                    fallback,
+                })
+            }
+
+            pub fn publish(&self, domain: String, cert: Arc<CertifiedKey>) {
+                self.challenges
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(domain, cert);
+            }
+
+            pub fn remove(&self, domain: &str) {
+                self.challenges
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .remove(domain);
+            }
+        }
+
+        impl std::fmt::Debug for TlsAlpnResolver {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("TlsAlpnResolver").finish_non_exhaustive()
+            }
+        }
+
+        impl ResolvesServerCert for TlsAlpnResolver {
+            fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+                let wants_acme_tls_alpn1 = client_hello
+                    .alpn()
+                    .map(|mut protos| protos.any(|p| p == ACME_TLS_ALPN_1.as_bytes()))
+                    .unwrap_or(false);
+                if wants_acme_tls_alpn1 {
+                    if let Some(name) = client_hello.server_name() {
+                        let guard = self.challenges.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Some(cert) = guard.get(name) {
+                            return Some(Arc::clone(cert));
+                        }
+                    }
+                }
+                Some(Arc::clone(&self.fallback))
+            }
+        }
+
+        /// A rustls `ServerConfig` wired to `resolver` and advertising
+        /// both `acme-tls/1` (so the ALPN negotiation can select it during
+        /// a validation) and `http/1.1` (so ordinary HTTPS traffic keeps
+        /// negotiating normally the rest of the time).
+        pub fn server_config(resolver: Arc<TlsAlpnResolver>) -> ServerConfig {
+            let mut config = ServerConfig::builder().with_no_client_auth().with_cert_resolver(resolver);
+            config.alpn_protocols = vec![ACME_TLS_ALPN_1.as_bytes().to_vec(), b"http/1.1".to_vec()];
+            config
+        }
+
+        /// TLS-ALPN-01 equivalent of `obtain_certificate_http01`: discover
+        /// -> register -> order -> generate+publish a validation cert into
+        /// `resolver` for `domain` -> respond -> poll -> finalize ->
+        /// download. Unlike HTTP-01, nothing needs to be reachable on port
+        /// 80 -- the CA validates over whatever port `resolver` (via
+        /// `server_config`) is already listening on for HTTPS.
+        pub async fn obtain_certificate(
+            directory_url: &str,
+            domain: &str,
+            contact_email: &str,
+            resolver: &Arc<TlsAlpnResolver>,
+        ) -> Result<(String, String)> {
+            let mut client = AcmeClient::discover(directory_url).await?;
+            client.new_account(&[contact_email.to_string()], true).await?;
+            let order = client.new_order(&[domain.to_string()]).await?;
+
+            for auth_url in &order.authorizations {
+                let auth = client.get_authorization(auth_url).await?;
+                let challenge = auth
+                    .challenges
+                    .iter()
+                    .find(|c| c.challenge_type == "tls-alpn-01")
+                    .ok_or_else(|| AppError::Internal("no tls-alpn-01 challenge offered".to_string()))?;
+
+                let digest = key_authorization_digest(&challenge.token, &client.account_key);
+                let cert = generate_validation_cert(domain, digest)?;
+                resolver.publish(domain.to_string(), Arc::new(cert));
+                client.respond_to_challenge(&challenge.url).await?;
+                client.poll_authorization_until_valid(auth_url, 20).await?;
+                resolver.remove(domain);
+            }
+
+            let (finalized, key_pem) = client.finalize_order(&order, domain).await?;
+            let cert_url = finalized
+                .certificate
+                .ok_or_else(|| AppError::Internal("ACME order finalized without a certificate URL".to_string()))?;
+            let cert_pem = client.download_certificate(&cert_url).await?;
+            Ok((cert_pem, key_pem))
+        }
+
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn validation_cert_der_contains_the_digest_as_an_octet_string() {
+                let digest = [0x42u8; 32];
+                let certified = generate_validation_cert("test.local", digest).unwrap();
+                let der = certified.cert[0].as_ref();
+
+                // The custom extension's content is a DER OCTET STRING
+                // (0x04, 0x20, <32 bytes>) wrapping the raw digest -- it
+                // must appear verbatim somewhere in the encoded cert, or
+                // this cert is useless to a real TLS-ALPN-01 validator.
+                let mut needle = vec![0x04, 0x20];
+                needle.extend_from_slice(&digest);
+                assert!(
+                    der.windows(needle.len()).any(|w| w == needle.as_slice()),
+                    "validation cert DER should contain the digest as an OCTET STRING"
+                );
+            }
+
+            #[test]
+            fn different_digests_produce_different_certs() {
+                let a = generate_validation_cert("test.local", [0x01; 32]).unwrap();
+                let b = generate_validation_cert("test.local", [0x02; 32]).unwrap();
+                assert_ne!(a.cert[0].as_ref(), b.cert[0].as_ref());
+            }
+
+            /// The strongest verification achievable without a real ACME
+            /// CA: a genuine rustls server (our `TlsAlpnResolver` wired
+            /// into a real `ServerConfig`, accepting real TCP connections)
+            /// and a genuine rustls client, actually performing a TLS
+            /// handshake. Connecting with ALPN `acme-tls/1` must yield the
+            /// published validation cert; connecting with `http/1.1` (or
+            /// no ALPN at all) must yield the fallback cert instead --
+            /// proving the resolver's ALPN-based branching, not just the
+            /// cert-generation logic in isolation.
+            #[tokio::test]
+            async fn resolver_serves_validation_cert_only_for_acme_tls_alpn1_connections() {
+                use rustls::pki_types::ServerName;
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                use tokio::net::{TcpListener, TcpStream};
+                use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+                let fallback = generate_validation_cert("fallback.local", [0xAA; 32]).unwrap();
+                let resolver = TlsAlpnResolver::new(Arc::new(fallback));
+
+                let challenge_digest = [0xBB; 32];
+                let challenge_cert = generate_validation_cert("challenge.local", challenge_digest).unwrap();
+                resolver.publish("challenge.local".to_string(), Arc::new(challenge_cert));
+
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+
+                // Accept-and-handshake on the server side, run concurrently
+                // (via `tokio::join!`, not `tokio::spawn`) with the client
+                // connect on the other side of the same in-process loopback
+                // -- avoids any 'static-lifetime requirement on `listener`.
+                async fn accept_one(acceptor: TlsAcceptor, listener: &TcpListener) {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    // A completed handshake is proof enough here (the
+                    // client-side peer_certificates() check below is what
+                    // actually asserts *which* cert was served); echo one
+                    // byte back so the client's read doesn't hang waiting
+                    // for application data that will never come from a
+                    // validation connection.
+                    let mut tls = acceptor.accept(stream).await.unwrap();
+                    let _ = tls.write_all(b"x").await;
+                }
+
+                let client_roots = danger::NoServerAuth::config();
+                let client_config = |alpn: &str| {
+                    let mut cfg = client_roots.clone();
+                    cfg.alpn_protocols = vec![alpn.as_bytes().to_vec()];
+                    cfg
+                };
+
+                // Each connection gets a freshly built `ServerConfig` (not
+                // a shared `Arc`) so TLS session-ticket resumption can't
+                // let the second connection silently reuse the first
+                // connection's already-resolved certificate instead of
+                // exercising the resolver's ALPN branch again.
+                let acceptor = TlsAcceptor::from(Arc::new(server_config(Arc::clone(&resolver))));
+                let connector = TlsConnector::from(Arc::new(client_config(ACME_TLS_ALPN_1)));
+                let connect = async {
+                    let tcp = TcpStream::connect(addr).await.unwrap();
+                    let server_name = ServerName::try_from("challenge.local").unwrap();
+                    let mut tls = connector.connect(server_name, tcp).await.unwrap();
+                    let mut buf = [0u8; 1];
+                    let _ = tls.read_exact(&mut buf).await;
+                    tls.get_ref().1.peer_certificates().expect("server must present a certificate").to_vec()
+                };
+                let (_, peer_certs) = tokio::join!(accept_one(acceptor, &listener), connect);
+
+                let mut needle = vec![0x04, 0x20];
+                needle.extend_from_slice(&challenge_digest);
+                assert!(
+                    peer_certs[0].as_ref().windows(needle.len()).any(|w| w == needle.as_slice()),
+                    "acme-tls/1 connection for a published domain must get the validation cert"
+                );
+
+                // Now a normal ALPN connection -- must get the fallback,
+                // not the validation cert (proves the resolver doesn't
+                // leak the validation cert to ordinary traffic).
+                let acceptor2 = TlsAcceptor::from(Arc::new(server_config(Arc::clone(&resolver))));
+                let connector2 = TlsConnector::from(Arc::new(client_config("http/1.1")));
+                let connect2 = async {
+                    let tcp = TcpStream::connect(addr).await.unwrap();
+                    let server_name = ServerName::try_from("challenge.local").unwrap();
+                    let mut tls = connector2.connect(server_name, tcp).await.unwrap();
+                    let mut buf = [0u8; 1];
+                    let _ = tls.read_exact(&mut buf).await;
+                    tls.get_ref().1.peer_certificates().expect("server must present a certificate").to_vec()
+                };
+                let (_, peer_certs2) = tokio::join!(accept_one(acceptor2, &listener), connect2);
+
+                assert!(
+                    !peer_certs2[0].as_ref().windows(needle.len()).any(|w| w == needle.as_slice()),
+                    "non-acme-tls/1 connection must NOT get the validation cert"
+                );
+            }
+
+            /// Minimal "accept any server cert" verifier for the test
+            /// client above -- the servers here use throwaway self-signed
+            /// certs, so a real CA-chain verifier would always reject
+            /// them. Test-only; production TLS-ALPN-01 CAs perform their
+            /// own out-of-band trust decision (they're validating a
+            /// challenge, not establishing a trusted HTTPS session).
+            mod danger {
+                use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+                use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+                use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
+                use std::sync::Arc;
+
+                #[derive(Debug)]
+                struct NoVerify;
+
+                impl ServerCertVerifier for NoVerify {
+                    fn verify_server_cert(
+                        &self,
+                        _end_entity: &CertificateDer<'_>,
+                        _intermediates: &[CertificateDer<'_>],
+                        _server_name: &ServerName<'_>,
+                        _ocsp_response: &[u8],
+                        _now: UnixTime,
+                    ) -> Result<ServerCertVerified, rustls::Error> {
+                        Ok(ServerCertVerified::assertion())
+                    }
+
+                    fn verify_tls12_signature(
+                        &self,
+                        _message: &[u8],
+                        _cert: &CertificateDer<'_>,
+                        _dss: &DigitallySignedStruct,
+                    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                        Ok(HandshakeSignatureValid::assertion())
+                    }
+
+                    fn verify_tls13_signature(
+                        &self,
+                        _message: &[u8],
+                        _cert: &CertificateDer<'_>,
+                        _dss: &DigitallySignedStruct,
+                    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+                        Ok(HandshakeSignatureValid::assertion())
+                    }
+
+                    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+                        vec![
+                            SignatureScheme::ECDSA_NISTP256_SHA256,
+                            SignatureScheme::ECDSA_NISTP384_SHA384,
+                            SignatureScheme::RSA_PSS_SHA256,
+                            SignatureScheme::ED25519,
+                        ]
+                    }
+                }
+
+                pub struct NoServerAuth;
+
+                impl NoServerAuth {
+                    pub fn config() -> ClientConfig {
+                        ClientConfig::builder()
+                            .dangerous()
+                            .with_custom_certificate_verifier(Arc::new(NoVerify))
+                            .with_no_client_auth()
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
