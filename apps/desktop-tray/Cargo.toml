@@ -21,3 +21,18 @@ notify-rust = "4"
 [profile.release]
 opt-level = "s"
 lto = true
+
+# cargo-deb (`cargo install cargo-deb`, Linux only) packaging metadata.
+# Not a new *build* dependency -- cargo-deb just packages the already-built
+# release binary; it doesn't get compiled into open-runo-tray itself.
+[package.metadata.deb]
+maintainer = "open-runo Contributors"
+copyright = "2026, open-runo Contributors"
+extended-description = """\
+Native system tray companion for the browser-based open-runo admin UI \
+(apps/desktop-wasm). Provides a tray icon, native OS notifications, and \
+an \"open the real app\" shortcut -- without depending on the tauri \
+package."""
+depends = "$auto"
+section = "utils"
+priority = "optional"

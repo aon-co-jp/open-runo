@@ -55,5 +55,33 @@ the exe under `%LOCALAPPDATA%\Programs\open-runo-tray\`, registers a
 correct `HKCU\...\Uninstall` entry (name, version, publisher, uninstall
 string), and the generated uninstaller removes both.
 
-macOS/Linux packaging (`.dmg`/`.deb`/`.AppImage`) is not yet set up — this
-binary was developed and verified on Windows only so far.
+## Build a Linux package (.deb)
+
+```bash
+# System libraries tray-icon/notify-rust/tao need on Debian/Ubuntu:
+sudo apt install libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+                  libssl-dev pkg-config libdbus-1-dev
+
+cargo install cargo-deb  # once
+cargo build --release
+cargo deb                # reads [package.metadata.deb] in Cargo.toml
+```
+
+Produces `target/debian/open-runo-desktop-tray_<version>-1_amd64.deb`.
+
+Verified end-to-end on real Ubuntu 26.04 (WSL2): the binary compiles clean
+with the libraries above, runs without crashing (confirmed alive under a
+running-process check, not just "didn't error on launch"), and the `.deb`
+installs cleanly via `dpkg -i` (binary lands at `/usr/bin/open-runo-tray`,
+correct `Depends:` line auto-detected from the linked shared libraries) and
+uninstalls cleanly via `dpkg -r`. The one thing *not* verified: the tray
+icon's on-screen appearance, because WSLg (this environment's X11/Wayland
+compositor) has no system-tray host panel to dock into — a property of
+this specific sandboxed environment, not of the binary; the identical
+tray-icon-rendering code path was already visually confirmed correct on
+Windows (see above). A real desktop environment (GNOME with
+AppIndicator/KStatusNotifierItem support, KDE, XFCE with the systray
+plugin, etc.) has a tray host and should render it normally.
+
+macOS packaging (`.dmg`/`.app` bundle) is not yet set up — no macOS
+environment was available to build or verify it from.
