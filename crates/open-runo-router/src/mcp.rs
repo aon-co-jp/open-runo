@@ -69,16 +69,60 @@ fn err_response(id: Value, code: i64, message: impl Into<String>) -> JsonRpcResp
 }
 
 /// The `initialize` handshake response: this server's protocol version,
-/// declared capabilities (tools and resources), and identity.
+/// declared capabilities (tools, resources, and prompts), and identity.
 fn initialize_result() -> Value {
     json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
-        "capabilities": { "tools": {}, "resources": {} },
+        "capabilities": { "tools": {}, "resources": {}, "prompts": {} },
         "serverInfo": {
             "name": "open-runo-router",
             "version": env!("CARGO_PKG_VERSION"),
         },
     })
+}
+
+/// `prompts/list`: the one prompt template this server offers. Like the
+/// tools and resources above, it's wired to real data (the same
+/// `openapi::spec()` behind the `openapi://spec` resource), not a static
+/// fixture -- an MCP client using this prompt gets the server's *current*
+/// API surface, not a snapshot frozen at prompt-authoring time.
+fn prompts_list_result() -> Value {
+    json!({
+        "prompts": [
+            {
+                "name": "summarize_api",
+                "description": "Ask the model to summarize this server's REST API surface, sourced from its live OpenAPI 3.0 document.",
+                "arguments": [],
+            },
+        ]
+    })
+}
+
+/// `prompts/get`: render `name` (with `arguments`, currently unused since
+/// `summarize_api` takes none) into the MCP `GetPromptResult` shape --
+/// a description plus a list of chat-style messages an MCP client can feed
+/// straight to its model.
+fn get_prompt(name: &str) -> Result<Value, String> {
+    match name {
+        "summarize_api" => {
+            let spec = crate::openapi::spec();
+            Ok(json!({
+                "description": "Summarize this server's REST API surface from its OpenAPI 3.0 document.",
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!(
+                            "Please summarize the REST API described by the following OpenAPI 3.0 document. \
+                             List the endpoints grouped by resource, and call out which ones are read-only \
+                             versus state-changing:\n\n{spec}"
+                        ),
+                    },
+                }],
+            }))
+        }
+        other => Err(format!("unknown prompt: {other}")),
+    }
 }
 
 /// `resources/list`: the two read-only resources this server exposes,
@@ -209,6 +253,16 @@ async fn dispatch(state: &Arc<AppState>, guardian: &Arc<KeyGuardian>, req: JsonR
                 // error (unlike an unknown tool name, which is a
                 // tool-level isError:true) -- resources/read has no
                 // equivalent "soft failure" envelope to report it inside.
+                Err(message) => err_response(id, -32602, message),
+            }
+        }
+        "prompts/list" => ok_response(id, prompts_list_result()),
+        "prompts/get" => {
+            let Some(name) = req.params.get("name").and_then(Value::as_str) else {
+                return Some(err_response(id, -32602, "invalid params: missing \"name\""));
+            };
+            match get_prompt(name) {
+                Ok(result) => ok_response(id, result),
                 Err(message) => err_response(id, -32602, message),
             }
         }
@@ -493,5 +547,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(call["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn prompts_list_advertises_the_real_prompt() {
+        let (addr, _handle) = start().await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 10, "method": "prompts/list", "params": {} }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let body: Value = resp.json().await.unwrap();
+        let prompts = body["result"]["prompts"].as_array().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert_eq!(prompts[0]["name"], "summarize_api");
+    }
+
+    #[tokio::test]
+    async fn prompts_get_summarize_api_returns_a_message_containing_the_real_openapi_spec() {
+        let (addr, _handle) = start().await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 11, "method": "prompts/get", "params": { "name": "summarize_api" } }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let body: Value = resp.json().await.unwrap();
+        let text = body["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        let spec = crate::openapi::spec();
+        assert!(
+            text.contains(&spec.to_string()),
+            "rendered prompt should embed the real, live OpenAPI spec, not a stub"
+        );
+    }
+
+    #[tokio::test]
+    async fn prompts_get_unknown_name_is_a_json_rpc_error() {
+        let (addr, _handle) = start().await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 12, "method": "prompts/get", "params": { "name": "no_such_prompt" } }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], -32602);
     }
 }
