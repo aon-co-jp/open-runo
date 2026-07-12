@@ -140,7 +140,10 @@ fn with_standard_errors(extra: Value) -> Value {
     Value::Object(responses)
 }
 
-fn spec() -> Value {
+/// `pub(crate)` (not just `fn`) so `mcp.rs` can expose this same spec as an
+/// MCP resource without going through the `GET /api/openapi.json` HTTP
+/// handler -- one source of truth for the spec body, two ways to reach it.
+pub(crate) fn spec() -> Value {
     json!({
         "openapi": "3.0.3",
         "info": {

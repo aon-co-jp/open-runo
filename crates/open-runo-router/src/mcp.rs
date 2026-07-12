@@ -69,16 +69,61 @@ fn err_response(id: Value, code: i64, message: impl Into<String>) -> JsonRpcResp
 }
 
 /// The `initialize` handshake response: this server's protocol version,
-/// declared capabilities (tools only), and identity.
+/// declared capabilities (tools and resources), and identity.
 fn initialize_result() -> Value {
     json!({
         "protocolVersion": MCP_PROTOCOL_VERSION,
-        "capabilities": { "tools": {} },
+        "capabilities": { "tools": {}, "resources": {} },
         "serverInfo": {
             "name": "open-runo-router",
             "version": env!("CARGO_PKG_VERSION"),
         },
     })
+}
+
+/// `resources/list`: the two read-only resources this server exposes,
+/// both backed by real production data (not MCP-only fixtures) -- the
+/// same OpenAPI spec `GET /api/openapi.json` serves, and the same health
+/// status `GET /health` serves.
+fn resources_list_result() -> Value {
+    json!({
+        "resources": [
+            {
+                "uri": "openapi://spec",
+                "name": "OpenAPI specification",
+                "description": "This server's REST API described as OpenAPI 3.0 -- the same document GET /api/openapi.json serves.",
+                "mimeType": "application/json",
+            },
+            {
+                "uri": "health://status",
+                "name": "Health status",
+                "description": "Current service health -- the same data GET /health serves.",
+                "mimeType": "application/json",
+            },
+        ]
+    })
+}
+
+/// `resources/read`: fetch one resource's content by URI, in the MCP
+/// `ReadResourceResult` shape (a list of contents, each tagged with the
+/// URI it came from and its MIME type).
+fn read_resource(uri: &str) -> Result<Value, String> {
+    let contents = match uri {
+        "openapi://spec" => crate::openapi::spec(),
+        "health://status" => json!({
+            "status": "ok",
+            "service": "open-runo-router",
+            "version": env!("CARGO_PKG_VERSION"),
+        }),
+        other => return Err(format!("unknown resource: {other}")),
+    };
+    Ok(json!({
+        "contents": [{
+            "uri": uri,
+            "mimeType": "application/json",
+            "text": contents.to_string(),
+        }]
+    }))
 }
 
 /// `tools/list`: the tool catalog an MCP client discovers and can then
@@ -153,6 +198,20 @@ async fn dispatch(state: &Arc<AppState>, guardian: &Arc<KeyGuardian>, req: JsonR
     Some(match req.method.as_str() {
         "initialize" => ok_response(id, initialize_result()),
         "tools/list" => ok_response(id, tools_list_result()),
+        "resources/list" => ok_response(id, resources_list_result()),
+        "resources/read" => {
+            let Some(uri) = req.params.get("uri").and_then(Value::as_str) else {
+                return Some(err_response(id, -32602, "invalid params: missing \"uri\""));
+            };
+            match read_resource(uri) {
+                Ok(result) => ok_response(id, result),
+                // Per the MCP spec, an unknown resource URI is a JSON-RPC
+                // error (unlike an unknown tool name, which is a
+                // tool-level isError:true) -- resources/read has no
+                // equivalent "soft failure" envelope to report it inside.
+                Err(message) => err_response(id, -32602, message),
+            }
+        }
         "tools/call" => {
             let Some(name) = req.params.get("name").and_then(Value::as_str) else {
                 return Some(err_response(id, -32602, "invalid params: missing \"name\""));
@@ -254,6 +313,59 @@ mod tests {
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"health_check"));
         assert!(names.contains(&"self_issue_api_key"));
+    }
+
+    #[tokio::test]
+    async fn resources_list_advertises_both_real_resources() {
+        let (addr, _handle) = start().await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 7, "method": "resources/list", "params": {} }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let body: Value = resp.json().await.unwrap();
+        let resources = body["result"]["resources"].as_array().unwrap();
+        let uris: Vec<&str> = resources.iter().map(|r| r["uri"].as_str().unwrap()).collect();
+        assert!(uris.contains(&"openapi://spec"));
+        assert!(uris.contains(&"health://status"));
+    }
+
+    #[tokio::test]
+    async fn resources_read_openapi_spec_matches_the_real_rest_endpoint() {
+        let (addr, _handle) = start().await;
+        let client = reqwest::Client::new();
+
+        let mcp_resp = client
+            .post(format!("http://{addr}/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 8, "method": "resources/read", "params": { "uri": "openapi://spec" } }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let mcp_body: Value = mcp_resp.json().await.unwrap();
+        let text = mcp_body["result"]["contents"][0]["text"].as_str().unwrap();
+        let via_mcp: Value = serde_json::from_str(text).unwrap();
+
+        // Same server, same data, reached two different ways -- the MCP
+        // resource must be byte-for-byte the same document as the plain
+        // REST endpoint, not a separate hand-maintained copy that could
+        // drift.
+        let via_rest: Value = crate::openapi::spec();
+        assert_eq!(via_mcp, via_rest);
+        assert_eq!(via_mcp["openapi"], "3.0.3");
+    }
+
+    #[tokio::test]
+    async fn resources_read_unknown_uri_is_a_json_rpc_error() {
+        let (addr, _handle) = start().await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/mcp"))
+            .json(&json!({ "jsonrpc": "2.0", "id": 9, "method": "resources/read", "params": { "uri": "no://such/resource" } }))
+            .send()
+            .await
+            .expect("request should succeed");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], -32602);
     }
 
     #[tokio::test]
