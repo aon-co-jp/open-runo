@@ -143,7 +143,7 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
         .route(
             Method::POST,
             "/api/ai/route",
-            wrap(handlers_hyper::route_request_handler(Arc::clone(&guardian))),
+            wrap(handlers_hyper::route_request_handler(Arc::clone(&state), Arc::clone(&guardian))),
         )
         .route(
             Method::GET,
@@ -188,7 +188,7 @@ pub fn build_hyper_app(state: Arc<AppState>, rate_limit_max: u32, rate_limit_win
         .route(
             Method::GET,
             "/api/cache/ai-stats",
-            wrap(handlers_hyper::ai_stats_handler(Arc::clone(&page_cache), Arc::clone(&guardian))),
+            wrap(handlers_hyper::ai_stats_handler(Arc::clone(&state), Arc::clone(&page_cache), Arc::clone(&guardian))),
         )
         .route(
             Method::POST,

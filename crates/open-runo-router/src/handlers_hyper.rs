@@ -4,7 +4,7 @@
 //! returns a `hyper_compat::Handler` closing over whatever state it needs,
 //! matching the JSON shape/status codes of its poem counterpart exactly.
 
-use crate::auth_hyper::{authenticate_with_session, check_api_key};
+use crate::auth_hyper::authenticate_with_session;
 use crate::hyper_compat::{
     empty_status, json_response, query_params, read_json_body, sse_response, Handler, Response, SseEvent,
 };
@@ -23,19 +23,6 @@ use open_runo_feature_flags::FeatureFlag;
 use open_runo_schema_registry::{Stage, DEFAULT_NAMESPACE};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-/// Poem-free equivalent of `audit::actor_from`: identify the caller from
-/// the `X-Api-Key` header alone (JWT/Claims extraction isn't wired at this
-/// layer yet, see auth_hyper.rs doc comment).
-fn actor_from_headers(headers: &hyper::HeaderMap) -> String {
-    match headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
-        Some(key) if !key.is_empty() => {
-            let prefix: String = key.chars().take(4).collect();
-            format!("api-key:{prefix}***")
-        }
-        _ => "anonymous".to_string(),
-    }
-}
 
 fn parse_stage(s: &str) -> Stage {
     match s.to_lowercase().as_str() {
@@ -63,7 +50,8 @@ pub fn federation_status_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let schema = state
@@ -118,7 +106,8 @@ pub fn compose_schemas_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let body: ComposeRequest = match read_json_body(req).await {
@@ -427,7 +416,8 @@ pub fn get_schema_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> H
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let query = query_params(&req);
@@ -474,7 +464,8 @@ pub fn get_schema_history_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let query = query_params(&req);
@@ -723,11 +714,13 @@ struct RouteResponse {
 }
 
 /// POST /api/ai/route — poem-free port of `handlers::ai_routing::route_request`.
-pub fn route_request_handler(guardian: Arc<KeyGuardian>) -> Handler {
+pub fn route_request_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
     Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let body: RouteRequest = match read_json_body(req).await {
@@ -794,10 +787,11 @@ pub fn register_persisted_query_handler(state: Arc<AppState>, guardian: Arc<KeyG
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let body: PqRegisterRequest = match read_json_body(req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -840,7 +834,8 @@ pub fn get_persisted_query_handler(state: Arc<AppState>, guardian: Arc<KeyGuardi
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let hash = params.get("hash").unwrap_or("").to_string();
@@ -887,10 +882,11 @@ pub fn purge_page_handler(
         let cache = Arc::clone(&cache);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let body: PurgeRequest = match read_json_body(req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -914,10 +910,11 @@ pub fn purge_all_pages_handler(
         let cache = Arc::clone(&cache);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             cache.purge_all().await;
             crate::audit::record(&state, &actor, "cache.purge_all", "*").await;
             json_response(StatusCode::OK, &PurgeResponse { purged: "*".to_string() })
@@ -949,14 +946,17 @@ struct AiStatsResponse {
 
 /// GET /api/cache/ai-stats — poem-free port of `handlers::cache::ai_stats`.
 pub fn ai_stats_handler(
+    state: Arc<AppState>,
     cache: Arc<crate::middleware::html_cache::HtmlPageCache>,
     guardian: Arc<KeyGuardian>,
 ) -> Handler {
     Arc::new(move |req, _params| {
+        let state = Arc::clone(&state);
         let cache = Arc::clone(&cache);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let resp = match cache.predictor() {
@@ -1027,10 +1027,11 @@ pub fn backup_export_handler(
         let cache = Arc::clone(&cache);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let config = crate::maintenance::BackupConfig::from_env();
             let (written, records) = match crate::maintenance::export_backup(&state, &cache, &config).await {
                 Ok(v) => v,
@@ -1069,10 +1070,11 @@ pub fn backup_import_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let body: ImportRequest = match read_json_body(req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -1111,10 +1113,11 @@ pub fn integrity_check_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let discrepancies = match state.db.consistency_check_and_heal().await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1158,10 +1161,11 @@ pub fn backup_restore_latest_handler(state: Arc<AppState>, guardian: Arc<KeyGuar
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let config = crate::maintenance::BackupConfig::from_env();
             let path = match crate::maintenance::find_latest_backup(&config) {
                 Some(p) => p,
@@ -1214,10 +1218,11 @@ pub fn migrate_export_sql_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let body: ExportSqlRequest = match read_json_body(req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -1263,10 +1268,11 @@ pub fn migrate_export_csv_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let csv = match crate::maintenance::export_csv(&state).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -1313,7 +1319,8 @@ pub fn scim_list_users_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>)
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let query = query_params(&req);
@@ -1346,10 +1353,11 @@ pub fn scim_create_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let input: open_runo_scim::UserInput = match read_json_body(req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -1397,7 +1405,8 @@ pub fn scim_get_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let id = params.get("id").unwrap_or("").to_string();
@@ -1423,10 +1432,11 @@ pub fn scim_replace_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let id = params.get("id").unwrap_or("").to_string();
             let input: open_runo_scim::UserInput = match read_json_body(req).await {
                 Ok(v) => v,
@@ -1474,10 +1484,11 @@ pub fn scim_delete_user_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let id = params.get("id").unwrap_or("").to_string();
 
             let owner = match scim_user_store(&state).get(&id).await {
@@ -1524,7 +1535,8 @@ pub fn scim_list_groups_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let query = query_params(&req);
@@ -1556,10 +1568,11 @@ pub fn scim_create_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let input: open_runo_scim::GroupInput = match read_json_body(req).await {
                 Ok(v) => v,
                 Err(resp) => return resp,
@@ -1585,7 +1598,8 @@ pub fn scim_get_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) 
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
             let id = params.get("id").unwrap_or("").to_string();
@@ -1610,10 +1624,11 @@ pub fn scim_replace_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardia
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let id = params.get("id").unwrap_or("").to_string();
             let input: open_runo_scim::GroupInput = match read_json_body(req).await {
                 Ok(v) => v,
@@ -1645,10 +1660,11 @@ pub fn scim_delete_group_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
-                return empty_status(status);
-            }
-            let actor = actor_from_headers(req.headers());
+            let method = req.method().clone();
+            let actor = match authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
+                Ok(actor) => format!("{}{}", if actor.via_session { "session:" } else { "" }, actor.owner),
+                Err(status) => return empty_status(status),
+            };
             let id = params.get("id").unwrap_or("").to_string();
 
             if let Err(e) = scim_group_store(&state).delete(&id).await {
@@ -1673,7 +1689,8 @@ pub fn stream_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -
         let state = Arc::clone(&state);
         let guardian = Arc::clone(&guardian);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &state.sessions).await {
                 return empty_status(status);
             }
 
@@ -1723,6 +1740,7 @@ pub fn ws_echo_handler() -> Handler {
 /// path, now also exposed as a plain WebSocket alternative. Purely
 /// additive: neither of those other two consumers is touched.
 pub fn ws_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Handler {
+    let auth_state = Arc::clone(&state);
     let inner = crate::hyper_compat::websocket_handler(move |mut conn| {
         let mut rx = state.events.subscribe();
         Box::pin(async move {
@@ -1742,9 +1760,11 @@ pub fn ws_events_handler(state: Arc<AppState>, guardian: Arc<KeyGuardian>) -> Ha
     });
     Arc::new(move |req, params| {
         let guardian = Arc::clone(&guardian);
+        let auth_state = Arc::clone(&auth_state);
         let inner = Arc::clone(&inner);
         Box::pin(async move {
-            if let Err(status) = check_api_key(req.headers(), &guardian).await {
+            let method = req.method().clone();
+            if let Err(status) = authenticate_with_session(req.headers(), &method, &guardian, &auth_state.sessions).await {
                 return empty_status(status);
             }
             inner(req, params).await
@@ -2672,7 +2692,7 @@ mod tests {
     async fn ai_route_returns_best_provider() {
         let state = Arc::new(AppState::new());
         let guardian = guardian(&state);
-        let router = Router::new().route(Method::POST, "/api/ai/route", route_request_handler(guardian));
+        let router = Router::new().route(Method::POST, "/api/ai/route", route_request_handler(Arc::clone(&state), guardian));
         let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
             .await
             .expect("bind ephemeral port");
@@ -2712,7 +2732,7 @@ mod tests {
     async fn ai_route_requires_api_key() {
         let state = Arc::new(AppState::new());
         let guardian = guardian(&state);
-        let router = Router::new().route(Method::POST, "/api/ai/route", route_request_handler(guardian));
+        let router = Router::new().route(Method::POST, "/api/ai/route", route_request_handler(Arc::clone(&state), guardian));
         let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
             .await
             .expect("bind ephemeral port");
@@ -3102,7 +3122,7 @@ mod tests {
         let mut config = HtmlCacheConfig::from_env();
         config.ai = false;
         let cache = Arc::new(HtmlPageCache::new(config));
-        let router = Router::new().route(Method::GET, "/api/cache/ai-stats", ai_stats_handler(cache, guardian));
+        let router = Router::new().route(Method::GET, "/api/cache/ai-stats", ai_stats_handler(Arc::clone(&state), cache, guardian));
         let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
             .await
             .expect("bind ephemeral port");
@@ -3334,6 +3354,74 @@ mod tests {
             .await
             .expect("request should succeed");
         assert_eq!(resp.status(), reqwest::StatusCode::NO_CONTENT);
+    }
+
+    /// SCIM is the third real (non-toy) route group rolled onto
+    /// `authenticate_with_session` -- after DB CRUD and Feature Flags --
+    /// completing the broader rollout past the original
+    /// `register_schema_handler`-only example noted in
+    /// docs/poem-parity.md. Create (state-changing, needs CSRF) then list
+    /// (read-only, cookie alone suffices), no X-Api-Key anywhere.
+    #[tokio::test]
+    async fn scim_create_and_list_accept_session_cookie_with_csrf_token() {
+        let state = Arc::new(AppState::new());
+        let guardian = guardian(&state);
+        let real_key = guardian
+            .issue("frank", vec!["developer".to_string()], None)
+            .await
+            .expect("issuing a real key should succeed");
+
+        let router = scim_router(&state, Arc::clone(&guardian)).route(
+            Method::POST,
+            "/api/session/login",
+            session_login_handler(Arc::clone(&guardian), Arc::clone(&state.sessions)),
+        );
+        let (addr, _handle) = serve(router, "127.0.0.1:0".parse().unwrap())
+            .await
+            .expect("bind ephemeral port");
+        let client = reqwest::Client::new();
+
+        let login_resp = client
+            .post(format!("http://{addr}/api/session/login"))
+            .header("x-api-key", &real_key)
+            .send()
+            .await
+            .expect("login should succeed");
+        let cookie_pair = login_resp
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let csrf_token = login_resp.json::<serde_json::Value>().await.unwrap()["csrf_token"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let resp = client
+            .post(format!("http://{addr}/scim/v2/Users"))
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .header("x-csrf-token", &csrf_token)
+            .json(&serde_json::json!({ "userName": "via-session@example.com", "roles": ["developer"] }))
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+
+        let resp = client
+            .get(format!("http://{addr}/scim/v2/Users"))
+            .query(&[("filter", r#"userName eq "via-session@example.com""#)])
+            .header(reqwest::header::COOKIE, &cookie_pair)
+            .send()
+            .await
+            .expect("request should succeed");
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["totalResults"], 1);
     }
 
     #[tokio::test]
