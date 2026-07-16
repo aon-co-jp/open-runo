@@ -32,7 +32,7 @@ surrealdb = { version = "2",  optional = true }
 
 # ── キャッシュ / KV ───────────────────────────────────────────────────────────
 redis          = { version = "0.27", features = ["tokio-comp", "connection-manager"], optional = true }
-deadpool-redis = { version = "0.18", optional = true }
+deadpool-redis = { version = "0.23", optional = true }
 
 # ── 列指向 / 分析 ─────────────────────────────────────────────────────────────
 clickhouse = { version = "0.13", optional = true }
