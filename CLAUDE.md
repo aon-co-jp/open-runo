@@ -354,8 +354,8 @@ production best practice"、"tokio async server 複数プロセス
 ## 現状(このリポジトリ固有)
 
 - `cargo check --workspace` / `cargo test --workspace` は成功する
-  (18クレート構成。2026-07-13時点で`open-runo-router`単体146テスト・
-  `open-runo-observability`9テスト含め全体failed 0)。
+  (18クレート構成。2026-08-05時点でデフォルトfeature構成400テスト、
+  全体failed 0を再確認。`--all-features`構成の再測定は未実施)。
   todo!()/unimplemented!()マーカーなし。
 - 直近パスで追加された機能(poem-cosmo-tauriからミラー): 月間リクエスト数
   計測+Analytics(`open-runo-observability::request_metrics`、
@@ -376,6 +376,27 @@ production best practice"、"tokio async server 複数プロセス
   アラビア語の10言語が揃っている。
 
 ## HANDOFF(直近の自動実行パス)
+
+- **2026-08-05 前回セッションでバックグラウンド実行中だった`cargo test
+  --workspace`(WSL Ubuntu、rustc/cargo 1.97)の完了確認 — 追加のコード
+  変更は無し、検証のみ**: 別セッションが`F:\runo`ドライブへの移行後の
+  健全性確認として起動していた`wsl -d Ubuntu -e bash -lc "cd
+  /mnt/f/runo/open-runo && cargo test --workspace"`(バックグラウンド、
+  `/tmp/cargo_test_out.log`へtee出力)が実行中のまま残っていたため、
+  今回のセッションでプロセス完了を待って結果を確認した。デフォルト
+  feature構成で**400テスト全green(failed 0、`FAILED`行0件)**を確認、
+  `git status`もクリーン(直前コミット`36d580d`のSharedDispatcherミラーが
+  そのままリモートと一致)。`F:\open-runo`から`F:\runo`への作業ドライブ
+  移行(本CLAUDE.mdの他リポジトリ側HANDOFFで進行中の件)後も、このリポジトリ
+  (`F:\runo\open-runo`)がWSL経由で問題なくビルド・テストできることの
+  再確認を兼ねる。
+  **正直な未実施事項**: (1) `--all-features`構成でのテストは今回は
+  実行していない(前回HANDOFFでは311〜362テストまで増加した記録あり、
+  デフォルト400との整合は次回パスで再確認が必要)。(2) `cargo tree`に
+  よる`poem`/`async-graphql-poem`の依存グラフ上の残存確認(2026-07-15
+  HANDOFFで指摘済みの既知の宿題)は今回も未着手のまま。(3) コード変更は
+  一切行っていない(監査・検証のみ)ため、実装上の前進は無い——次回パスは
+  上記(1)(2)、または`docs/cosmo-parity.md`の残りギャップ着手を推奨。
 
 - **2026-07-16 `open-runo-appserver::SharedDispatcher`をpoem-cosmo-tauri
   からミラー(「分身の術」マルチテナント化の基盤部分のみ)**: ユーザーの

@@ -4,9 +4,11 @@
 > open-e-gov / OpenRedmine / OpenWordPress など新プロジェクトのリポジトリに
 > このファイルをコピーして、上から順に進めてください。
 >
-> 対象バージョン: workspace 0.1.0（18 クレート / 262 テスト、2026-07-11
-> 実測。最新のクレート数・テスト数は `CLAUDE.md` の「現状」節参照）
-> 最終更新: 2026-07-11
+> 対象バージョン: workspace 0.1.0（18 クレート / 400 テスト、2026-08-05
+> 実測、デフォルトfeature構成・WSL Ubuntu rustc/cargo 1.97・failed 0。
+> `--all-features`構成の再測定は次回パス予定。最新のクレート数・テスト数は
+> `CLAUDE.md` の「現状」節参照）
+> 最終更新: 2026-08-05
 
 ---
 
@@ -279,7 +281,8 @@ OSネイティブ通知・Windows インストーラーが必要な場合は `ap
 
 ```bash
 cd open-runo
-cargo test --workspace     # 302 テスト（--all-features で311）+ doctest が全部通れば OK
+cargo test --workspace     # 400 テスト（2026-08-05実測、デフォルトfeature）+ doctest が全部通れば OK
+                            # （--all-featuresでの再測定は未実施、次回パス予定）
 cargo run -p open-runo-gateway   # REST + GraphQL 統合バイナリ起動
 ```
 
